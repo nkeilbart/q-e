@@ -58,6 +58,11 @@ MODULE realus
   !! are replaced by filtered ones, see filter_radial
   INTEGER, PARAMETER :: nqfine = 3201
   REAL(DP), ALLOCATABLE :: qftab(:,:,:,:)
+  LOGICAL :: lbfilter = .FALSE.
+  !! (prototype, env QE_RS_FILTER=1) filtered real-space beta projectors
+  INTEGER, PARAMETER :: nbfine = 3201
+  REAL(DP), ALLOCATABLE :: bftab(:,:,:)
+  !! (nbfine, nbeta, nsp) radial tables of the filtered beta projectors
   !! (nqfine, 0:lmax, nbeta*(nbeta+1)/2, nsp) radial tables of the filtered Q
   !! (prototype, env QE_RS_BLOCK) >1: k-point real-space projectors are applied
   !! to rs_block bands at a time (h_psi_rs_k_block, s_psi_rs_k_block)
@@ -262,9 +267,11 @@ MODULE realus
       REAL(DP), ALLOCATABLE :: boxdist(:), xyz(:,:), diff(:)
       REAL(DP)              :: mbr, mbx, mby, mbz, dmbx, dmby, dmbz, aux
       REAL(DP)              :: inv_nr1, inv_nr2, inv_nr3, boxradsq_ia, boxrad_ia
-      REAL(DP)              :: rfacq, gnyq, qpassq, qstopq, wstopq
-      INTEGER               :: l, nb, mb, nbt
-      CHARACTER(LEN=32)     :: envname, flabel
+      REAL(DP)              :: rfacq, gnyq, qpassq, qstopq, wstopq, rsel
+      INTEGER               :: l, nb, mb, nbt, nfun, nfunx
+      CHARACTER(LEN=32)     :: envname
+      INTEGER, ALLOCATABLE  :: lfun(:,:)
+      REAL(DP), ALLOCATABLE :: qtmp(:,:)
       !
       initialisation_level = 3
       IF ( .not. okvan ) RETURN
@@ -305,26 +312,24 @@ MODULE realus
          !
          lqfilter = ( NINT( env_real( 'QE_RQ_FILTER', 0.0_DP ) ) == 1 )
          IF ( lqfilter ) THEN
-            rfacq  = env_real( 'QE_RQ_RFAC', 1.0_DP )
-            DO nt = 1, nsp
-               WRITE( envname, '("QE_RQ_RFAC_",I0)' ) nt
-               boxrad(nt) = boxrad(nt) * env_real( TRIM(envname), rfacq )
-            ENDDO
+            rfacq  = env_real( 'QE_RQ_RFAC', 0.0_DP )   ! 0: automatic
             gnyq   = tpiba * 0.5_DP * MIN( dfft%nr1*SQRT(SUM(bg(:,1)**2)), &
                                            dfft%nr2*SQRT(SUM(bg(:,2)**2)), &
                                            dfft%nr3*SQRT(SUM(bg(:,3)**2)) )
-            qpassq = env_real( 'QE_RQ_QPASS', 0.8_DP ) * SQRT(ecutrho)
+            qpassq = env_real( 'QE_RQ_QPASS', 0.9_DP ) * SQRT(ecutrho)
             qstopq = env_real( 'QE_RQ_QSTOP', (2.0_DP*gnyq - qpassq)/SQRT(ecutrho) ) * SQRT(ecutrho)
             wstopq = env_real( 'QE_RQ_WSTOP', 1.0_DP )
-            WRITE( stdout, '(5X,"RS Q filter: radii (bohr)",10F8.4)' ) boxrad(:)*alat
-            WRITE( stdout, '(5X,"RS Q filter: qpass=",F8.4," qstop=",F8.4," wstop=",ES9.2,"  sqrt(ecutrho)=",F8.4, &
+            WRITE( stdout, '(5X,"RS filter: Q     qpass=",F8.4," qstop=",F8.4," wstop=",ES9.2,"  sqrt(ecutrho)=",F8.4, &
                    &"  G_nyq(dense)=",F8.4)' ) qpassq, qstopq, wstopq, SQRT(ecutrho), gnyq
             IF ( ALLOCATED(qftab) ) DEALLOCATE( qftab )
             nbt = MAXVAL( upf(1:nsp)%nbeta )
+            nfunx = (MAXVAL(upf(1:nsp)%nqlc)) * nbt*(nbt+1)/2
             ALLOCATE( qftab( nqfine, 0:MAXVAL(upf(1:nsp)%nqlc)-1, nbt*(nbt+1)/2, nsp ) )
+            ALLOCATE( lfun(3,nfunx), qtmp(nqfine,nfunx) )
             qftab = 0.0_DP
             DO nt = 1, nsp
                IF ( .not. upf(nt)%tvanp ) CYCLE
+               nfun = 0
                DO l = 0, upf(nt)%nqlc - 1
                   DO nb = 1, upf(nt)%nbeta
                      DO mb = nb, upf(nt)%nbeta
@@ -332,14 +337,24 @@ MODULE realus
                         IF ( .not. ( l >= abs( upf(nt)%lll(nb) - upf(nt)%lll(mb) ) .and. &
                                      l <= upf(nt)%lll(nb) + upf(nt)%lll(mb)        .and. &
                                      mod( l + upf(nt)%lll(nb) + upf(nt)%lll(mb), 2 ) == 0 ) ) CYCLE
-                        WRITE( flabel, '("Q type",I2," ij",I3)' ) nt, ijv
-                        CALL filter_radial( flabel, l, upf(nt)%kkbeta, rgrid(nt)%r, rgrid(nt)%rab, &
-                                            upf(nt)%qfuncl(1:upf(nt)%kkbeta,ijv,l), boxrad(nt)*alat, &
-                                            qpassq, qstopq, wstopq, nqfine, qftab(1,l,ijv,nt) )
+                        ! skip identically zero functions
+                        IF ( MAXVAL( ABS( upf(nt)%qfuncl(1:upf(nt)%kkbeta,ijv,l) ) ) < eps16 ) CYCLE
+                        nfun = nfun + 1
+                        lfun(:,nfun) = (/ l, ijv, l /)
                      ENDDO
                   ENDDO
                ENDDO
+               IF ( nfun == 0 ) CYCLE
+               WRITE( envname, '("QE_RQ_RFAC_",I0)' ) nt
+               CALL filter_species( 'Q', nt, nfun, lfun, boxrad(nt)*alat, &
+                    boxrad(nt)*alat*env_real( TRIM(envname), rfacq ), &
+                    env_real( 'QE_RQ_TOL', 1.0D-5 ), qpassq, qstopq, wstopq, nqfine, rsel, qtmp )
+               boxrad(nt) = rsel / alat
+               DO i = 1, nfun
+                  qftab(:,lfun(3,i),lfun(2,i),nt) = qtmp(:,i)
+               ENDDO
             ENDDO
+            DEALLOCATE( lfun, qtmp )
          ENDIF
          !
       ENDIF
@@ -902,11 +917,12 @@ MODULE realus
       ! ... filtered (optimised) real-space projectors: prototype, see filter_beta
       LOGICAL               :: lfilter
       INTEGER               :: nbt, i0
-      CHARACTER(LEN=32)     :: envname, flabel
-      REAL(DP), ALLOCATABLE :: fr2(:)
-      INTEGER, PARAMETER    :: nfine = 3201  ! radial table of the filtered projectors
+      CHARACTER(LEN=32)     :: envname
+      INTEGER, ALLOCATABLE  :: lfun(:,:)
+      REAL(DP)              :: rsel
+      INTEGER, PARAMETER    :: nfine = nbfine
       REAL(DP)              :: rfac, qpass, qstop, wstop, gnyq, drf, xr, tt
-      REAL(DP), ALLOCATABLE :: ftab(:,:,:), frad(:)
+      REAL(DP), ALLOCATABLE :: frad(:)
       !
       initialisation_level = initialisation_level + 5
       IF ( .not. okvan ) CALL errore &
@@ -920,7 +936,8 @@ MODULE realus
       ! ...                  (default: 2*G_nyquist(smooth grid) - q_pass)
       ! ...  QE_RS_WSTOP     weight of the stop band in the least-squares fit
       lfilter = ( NINT( env_real( 'QE_RS_FILTER', 0.0_DP ) ) == 1 )
-      rfac  = env_real( 'QE_RS_RFAC', 1.0_DP )
+      rfac  = env_real( 'QE_RS_RFAC', 0.0_DP )   ! 0: automatic
+      lbfilter = lfilter
       rs_block = MAX( 1, NINT( env_real( 'QE_RS_BLOCK', 1.0_DP ) ) )
       WRITE( stdout, '(5X,"RS projectors: band block = ",I4)' ) rs_block
       qpass = env_real( 'QE_RS_QPASS', 1.0_DP ) * SQRT(ecutwfc)
@@ -959,10 +976,26 @@ MODULE realus
          !
          boxrad_beta(:) = boxrad_beta(:) / alat
          IF ( lfilter ) THEN
-            ! QE_RS_RFAC_<it> overrides QE_RS_RFAC for species it
+            ! ... sphere radius: chosen automatically so that the filter error is
+            ! ... below QE_RS_TOL, unless QE_RS_RFAC or QE_RS_RFAC_<it> fixes it
+            nbt = MAXVAL( upf(1:nsp)%nbeta )
+            IF ( ALLOCATED(bftab) ) DEALLOCATE( bftab )
+            ALLOCATE( bftab(nbfine,nbt,nsp) )
+            bftab = 0.0_DP
+            WRITE( stdout, '(5X,"RS filter: beta  qpass=",F8.4," qstop=",F8.4," (bohr^-1)  wstop=",ES9.2, &
+                   &"  G_nyq(smooth)=",F8.4)' ) qpass, qstop, wstop, gnyq
             DO it = 1, nsp
+               IF ( .not. upf(it)%tvanp .OR. upf(it)%nbeta == 0 ) CYCLE
                WRITE( envname, '("QE_RS_RFAC_",I0)' ) it
-               boxrad_beta(it) = boxrad_beta(it) * env_real( TRIM(envname), rfac )
+               ALLOCATE( lfun(3,upf(it)%nbeta) )
+               DO nb = 1, upf(it)%nbeta
+                  lfun(:,nb) = (/ upf(it)%lll(nb), nb, 0 /)
+               ENDDO
+               CALL filter_species( 'beta', it, upf(it)%nbeta, lfun, boxrad_beta(it)*alat, &
+                    boxrad_beta(it)*alat*env_real( TRIM(envname), rfac ), &
+                    env_real( 'QE_RS_TOL', 3.0D-6 ), qpass, qstop, wstop, nbfine, rsel, bftab(1,1,it) )
+               boxrad_beta(it) = rsel / alat
+               DEALLOCATE( lfun )
             ENDDO
          ENDIF
          WRITE( stdout, '(5X,"RS projectors: filter=",L1,"  rfac=",F6.3,"  sphere radii (bohr):",10F8.4)' ) &
@@ -1141,24 +1174,6 @@ MODULE realus
       !
       betasave = 0.D0
       !
-      IF ( lfilter ) THEN
-         nbt = MAXVAL( upf(1:nsp)%nbeta )
-         ALLOCATE( ftab(nfine,nbt,nsp) )
-         ftab = 0.0_DP
-         WRITE( stdout, '(5X,"RS filter: qpass=",F8.4," qstop=",F8.4," (bohr^-1)  wstop=",ES9.2, &
-                &"  G_nyq(smooth)=",F8.4)' ) qpass, qstop, wstop, gnyq
-         DO nt = 1, nsp
-            IF ( .not. upf(nt)%tvanp ) CYCLE
-            DO nb = 1, upf(nt)%nbeta
-               WRITE( flabel, '("beta type",I3," nb",I3)' ) nt, nb
-               ALLOCATE( fr2(upf(nt)%kkbeta) )
-               fr2(:) = upf(nt)%beta(1:upf(nt)%kkbeta,nb) * rgrid(nt)%r(1:upf(nt)%kkbeta)
-               CALL filter_radial( flabel, upf(nt)%lll(nb), upf(nt)%kkbeta, rgrid(nt)%r, rgrid(nt)%rab, &
-                                   fr2, boxrad_beta(nt)*alat, qpass, qstop, wstop, nfine, ftab(1,nb,nt) )
-               DEALLOCATE( fr2 )
-            ENDDO
-         ENDDO
-      ENDIF
       ! Box is set, Y_lm is known in the box, now the calculation can commence
       ! Reminder: In real space
       ! |Beta_lm(r)>=f_l(r).Y_lm(r)
@@ -1197,10 +1212,10 @@ MODULE realus
                   xr = boxdist_beta(box0(ia)+i) / drf
                   i0 = MIN( MAX( INT(xr), 1 ), nfine-3 )   ! table points i0..i0+3 <-> x = i0-1..i0+2
                   tt = xr - DBLE(i0-1)
-                  frad(i) = - ftab(i0  ,nb,nt) * (tt-1)*(tt-2)*(tt-3) / 6.0_DP &
-                            + ftab(i0+1,nb,nt) *  tt   *(tt-2)*(tt-3) / 2.0_DP &
-                            - ftab(i0+2,nb,nt) *  tt   *(tt-1)*(tt-3) / 2.0_DP &
-                            + ftab(i0+3,nb,nt) *  tt   *(tt-1)*(tt-2) / 6.0_DP
+                  frad(i) = - bftab(i0  ,nb,nt) * (tt-1)*(tt-2)*(tt-3) / 6.0_DP &
+                            + bftab(i0+1,nb,nt) *  tt   *(tt-2)*(tt-3) / 2.0_DP &
+                            - bftab(i0+2,nb,nt) *  tt   *(tt-1)*(tt-3) / 2.0_DP &
+                            + bftab(i0+3,nb,nt) *  tt   *(tt-1)*(tt-2) / 6.0_DP
                ENDDO
                DO ih = 1, nh(nt)
                   IF ( indv(ih,nt) /= nb ) CYCLE
@@ -1258,7 +1273,6 @@ MODULE realus
       !
       DEALLOCATE( boxdist_beta )
       DEALLOCATE( spher_beta )
-      IF ( lfilter ) DEALLOCATE( ftab )
       !
       CALL stop_clock( 'realus:tabp' )
       CALL stop_clock( 'betapointlist' )
@@ -1281,39 +1295,58 @@ MODULE realus
     END FUNCTION env_real
     !
     !------------------------------------------------------------------------
-    SUBROUTINE filter_radial( label, l, kkb, r, rab, fr2, rmax, qpass, qstop, wstop, nfine, chi )
+    SUBROUTINE filter_prepare( l, kkb, r, rab, fr2, qpass, npass, fq )
       !------------------------------------------------------------------------
-      !! Optimised real-space version of a radial function f(r) of angular
-      !! momentum l given on a radial grid as fr2 = f(r)*r^2 (in the spirit of
-      !! King-Smith, Payne and Lin, PRB 44, 13063 (1991)).
+      !! Bessel transform f(q) = int f(r) j_l(qr) r^2 dr of a radial function
+      !! given as fr2 = f(r)*r^2, on the pass-band grid q_i=(i-1)*qpass/(npass-1)
+      INTEGER, INTENT(IN)   :: l, kkb, npass
+      REAL(DP), INTENT(IN)  :: r(kkb), rab(kkb), fr2(kkb), qpass
+      REAL(DP), INTENT(OUT) :: fq(npass)
+      INTEGER :: i
+      REAL(DP), ALLOCATABLE :: aux(:), jlg(:)
+      ALLOCATE( aux(kkb), jlg(kkb) )
+      DO i = 1, npass
+         CALL sph_bes( kkb, r, (i-1)*qpass/(npass-1), l, jlg )
+         aux(1:kkb) = fr2(1:kkb) * jlg(1:kkb)
+         CALL simpson( kkb, aux, rab, fq(i) )
+      ENDDO
+      DEALLOCATE( aux, jlg )
+    END SUBROUTINE filter_prepare
+    !
+    !------------------------------------------------------------------------
+    SUBROUTINE filter_fit( l, npass, fq, rmax, qpass, qstop, wstop, epass, estop, nfine, chi )
+      !------------------------------------------------------------------------
+      !! Optimised real-space version of a radial function of angular momentum
+      !! l with Bessel transform fq (see filter_prepare), in the spirit of
+      !! King-Smith, Payne and Lin, PRB 44, 13063 (1991).
       !! chi(r) is strictly confined to r < rmax and expanded as
       !!    chi(r) = sum_n c_n j_l(k_n r),   j_l(k_n rmax) = 0
       !! The c_n minimise
       !!    int_0^qpass q^2 |chi(q)-f(q)|^2 dq + wstop int_qstop^qend q^2 |chi(q)|^2 dq
-      !! with chi(q) = int_0^rmax chi(r) j_l(qr) r^2 dr. For qpass < q < qstop
-      !! chi(q) is free. Output: chi on the uniform grid r_i=(i-1)*rmax/(nfine-1).
+      !! For qpass < q < qstop chi(q) is free. The Bessel transforms of the
+      !! basis functions are analytic, so a fit costs one small least-squares
+      !! problem. Output: relative pass-band error epass, stop-band leak estop
+      !! and, if nfine > 0, chi on the uniform grid r_i=(i-1)*rmax/(nfine-1).
       !
-      CHARACTER(LEN=*), INTENT(IN) :: label
-      INTEGER, INTENT(IN)   :: l, kkb, nfine
-      REAL(DP), INTENT(IN)  :: r(kkb), rab(kkb), fr2(kkb)
-      REAL(DP), INTENT(IN)  :: rmax, qpass, qstop, wstop
-      REAL(DP), INTENT(OUT) :: chi(nfine)
+      INTEGER, INTENT(IN)   :: l, npass, nfine
+      REAL(DP), INTENT(IN)  :: fq(npass), rmax, qpass, qstop, wstop
+      REAL(DP), INTENT(OUT) :: epass, estop
+      REAL(DP), INTENT(OUT) :: chi(*)
       !
-      INTEGER, PARAMETER :: nbasx = 160, nfit = 801
-      REAL(DP), PARAMETER :: dqp = 0.05_DP, dqs = 0.10_DP
-      INTEGER  :: nbas, i, n, ir, npass, nst, nrow, info, lwork, rank
-      REAL(DP) :: kzero(nbasx), coef(nbasx)
-      REAL(DP) :: dr, x0, x1, f0, f1, fm, xm, q, qend, qbas, w, val, epass, estop, eraw, bnorm
+      INTEGER, PARAMETER :: nbasx = 200
+      REAL(DP), PARAMETER :: dqs = 0.10_DP
+      INTEGER  :: nbas, i, n, ir, nst, nrow, info, lwork, rank
+      REAL(DP) :: kzero(nbasx), coef(nbasx), jm(nbasx), jp(nbasx)
+      REAL(DP) :: x0, x1, f0, f1, fm, xm, q, qend, qbas, w, bnorm, jq
       REAL(DP) :: xx(1), ff(1)
-      REAL(DP), ALLOCATABLE :: rf(:), wf(:), fb(:,:), jl(:), a(:,:), a0(:,:), b(:), b0(:), &
-                               sv(:), work(:), aux(:), jlg(:), bq(:), res(:)
+      REAL(DP), ALLOCATABLE :: a(:,:), a0(:,:), b(:), b0(:), sv(:), work(:), res(:), rf(:), jl(:)
       !
       qend = 3.0_DP * qstop
       qbas = 1.5_DP * qstop
+      xx(1) = 1.0_DP
       !
       ! ... zeros of j_l(k r) at r = rmax
       nbas = 0
-      xx(1) = 1.0_DP
       x0 = 0.5_DP ; CALL sph_bes( 1, xx, x0, l, ff ) ; f0 = ff(1)
       DO WHILE ( nbas < nbasx )
          x1 = x0 + 0.05_DP
@@ -1330,81 +1363,146 @@ MODULE realus
                ENDIF
             ENDDO
             nbas = nbas + 1
-            kzero(nbas) = 0.5_DP*(x0+x1) / rmax
-            x1 = 0.5_DP*(x0+x1) + 0.05_DP
+            xm = 0.5_DP*(x0+x1)
+            kzero(nbas) = xm / rmax
+            ! j_{l-1} and j_{l+1} at the zero (needed by the analytic integrals)
+            IF ( l == 0 ) THEN
+               jm(nbas) = COS(xm) / xm
+            ELSE
+               CALL sph_bes( 1, xx, xm, l-1, ff ) ; jm(nbas) = ff(1)
+            ENDIF
+            CALL sph_bes( 1, xx, xm, l+1, ff ) ; jp(nbas) = ff(1)
+            x1 = xm + 0.05_DP
             CALL sph_bes( 1, xx, x1, l, ff ) ; f1 = ff(1)
          ENDIF
          x0 = x1 ; f0 = f1
       ENDDO
       !
-      ! ... uniform radial grid on [0,rmax] with simpson weights (times r^2)
-      ALLOCATE( rf(nfit), wf(nfit), fb(nfit,nbas), jl(nfit) )
-      dr = rmax / (nfit-1)
-      DO ir = 1, nfit
-         rf(ir) = (ir-1)*dr
-         wf(ir) = MERGE( 4.0_DP, 2.0_DP, MOD(ir,2) == 0 ) * dr/3.0_DP * rf(ir)**2
-      ENDDO
-      wf(1) = 0.0_DP ; wf(nfit) = dr/3.0_DP * rf(nfit)**2
-      DO n = 1, nbas
-         CALL sph_bes( nfit, rf, kzero(n), l, fb(1,n) )
-      ENDDO
-      !
-      npass = NINT( qpass/dqp ) + 1
       nst   = NINT( (qend-qstop)/dqs ) + 1
       nrow  = npass + nst
-      ALLOCATE( a(nrow,nbas), a0(nrow,nbas), b(MAX(nrow,nbas)), b0(nrow), bq(nrow), &
-                sv(nbas), aux(kkb), jlg(kkb), res(nrow) )
+      ALLOCATE( a(nrow,nbas), a0(nrow,nbas), b(MAX(nrow,nbas)), b0(nrow), sv(nbas), res(nrow) )
       DO i = 1, nrow
          IF ( i <= npass ) THEN
             q = (i-1) * qpass/(npass-1)
             w = q * SQRT( qpass/(npass-1) )
+            b(i) = w * fq(i)
          ELSE
             q = qstop + (i-npass-1) * (qend-qstop)/(nst-1)
             w = q * SQRT( wstop * (qend-qstop)/(nst-1) )
+            b(i) = 0.0_DP
          ENDIF
-         ! f(q) of the original function
-         CALL sph_bes( kkb, r, q, l, jlg )
-         aux(1:kkb) = fr2(1:kkb) * jlg(1:kkb)
-         CALL simpson( kkb, aux, rab, val )
-         bq(i) = val * q
-         CALL sph_bes( nfit, rf, q, l, jl )
+         ! int_0^R j_l(kr) j_l(qr) r^2 dr = -R^2 k j_{l-1}(kR) j_l(qR) / (k^2-q^2)   [j_l(kR)=0]
+         CALL sph_bes( 1, xx, q*rmax, l, ff ) ; jq = ff(1)
          DO n = 1, nbas
-            a(i,n) = w * SUM( wf(:) * fb(:,n) * jl(:) )
+            IF ( ABS( kzero(n) - q ) > 1.0D-7 * kzero(n) ) THEN
+               a(i,n) = - w * rmax**2 * kzero(n) * jm(n) * jq / ( kzero(n)**2 - q**2 )
+            ELSE
+               a(i,n) = - w * 0.5_DP * rmax**3 * jm(n) * jp(n)
+            ENDIF
          ENDDO
-         b(i) = MERGE( w*val, 0.0_DP, i <= npass )
       ENDDO
       a0 = a ; b0(1:nrow) = b(1:nrow)
       lwork = 20*( nrow + nbas ) + 1000
       ALLOCATE( work(lwork) )
       CALL DGELSS( nrow, nbas, 1, a, nrow, b, MAX(nrow,nbas), sv, 1.0D-11, rank, work, lwork, info )
-      IF ( info /= 0 ) CALL errore( 'filter_radial', 'DGELSS failed', ABS(info) )
+      IF ( info /= 0 ) CALL errore( 'filter_fit', 'DGELSS failed', ABS(info) )
       coef(1:nbas) = b(1:nbas)
       !
-      ! ... chi on the output grid
-      DEALLOCATE( rf, jl )
-      ALLOCATE( rf(nfine), jl(nfine) )
-      DO ir = 1, nfine
-         rf(ir) = (ir-1) * rmax / (nfine-1)
-      ENDDO
-      chi(:) = 0.0_DP
-      DO n = 1, nbas
-         CALL sph_bes( nfine, rf, kzero(n), l, jl )
-         chi(:) = chi(:) + coef(n) * jl(:)
-      ENDDO
-      !
-      ! ... diagnostics: relative pass-band error, stop-band leakage (filtered and raw)
       res(:) = MATMUL( a0, coef(1:nbas) ) - b0(:)
       bnorm = MAX( SUM( b0(1:npass)**2 ), 1.0D-300 )
       epass = SQRT( SUM( res(1:npass)**2 ) / bnorm )
       estop = SQRT( SUM( res(npass+1:nrow)**2 ) / wstop / bnorm )
-      eraw  = SQRT( SUM( bq(npass+1:nrow)**2 ) * (qend-qstop)/(nst-1) / bnorm )
-      WRITE( stdout, '(5X,"RS filter: ",A," l=",I1," R=",F7.4, &
-           &" nbas=",I3," rank=",I3,"  pass err=",ES9.2,"  stop leak=",ES9.2,"  (raw leak=",ES9.2,")")' ) &
-           TRIM(label), l, rmax, nbas, rank, epass, estop, eraw
       !
-      DEALLOCATE( rf, wf, fb, jl, a, a0, b, b0, bq, sv, aux, jlg, res, work )
+      IF ( nfine > 0 ) THEN
+         ALLOCATE( rf(nfine), jl(nfine) )
+         DO ir = 1, nfine
+            rf(ir) = (ir-1) * rmax / (nfine-1)
+         ENDDO
+         chi(1:nfine) = 0.0_DP
+         DO n = 1, nbas
+            CALL sph_bes( nfine, rf, kzero(n), l, jl )
+            chi(1:nfine) = chi(1:nfine) + coef(n) * jl(:)
+         ENDDO
+         DEALLOCATE( rf, jl )
+      ENDIF
+      DEALLOCATE( a, a0, b, b0, sv, res, work )
       !
-    END SUBROUTINE filter_radial
+    END SUBROUTINE filter_fit
+    !
+    !------------------------------------------------------------------------
+    SUBROUTINE filter_species( what, nt, nfun, lfun, rraw, rfix, tol, qpass, qstop, wstop, &
+                               nfine, rsel, tab )
+      !------------------------------------------------------------------------
+      !! Filters the nfun radial functions of species nt ("what"='beta' or 'Q')
+      !! on a common sphere. If rfix > 0 the sphere radius is rfix; otherwise
+      !! the smallest radius (in steps of 2.5% of rraw, between 0.5 and 3 times
+      !! rraw) for which every function has pass-band error and stop-band leak
+      !! below tol is searched by bisection. Output: rsel and the tables.
+      !
+      USE uspp_param, ONLY : upf
+      USE atom,       ONLY : rgrid
+      !
+      CHARACTER(LEN=*), INTENT(IN) :: what
+      INTEGER, INTENT(IN)   :: nt, nfun, nfine
+      INTEGER, INTENT(IN)   :: lfun(3,nfun)   ! l, and (nb,0) for beta or (ijv,l) for Q
+      REAL(DP), INTENT(IN)  :: rraw, rfix, tol, qpass, qstop, wstop
+      REAL(DP), INTENT(OUT) :: rsel
+      REAL(DP), INTENT(OUT) :: tab(nfine,nfun)
+      !
+      REAL(DP), PARAMETER :: dqp = 0.05_DP, fstep = 0.025_DP
+      INTEGER :: npass, kkb, ifun, jlo, jhi, jmid, nfit
+      REAL(DP) :: err, ep, es, dum(1)
+      REAL(DP), ALLOCATABLE :: fq(:,:), fr2(:)
+      !
+      kkb   = upf(nt)%kkbeta
+      npass = NINT( qpass/dqp ) + 1
+      ALLOCATE( fq(npass,nfun), fr2(kkb) )
+      DO ifun = 1, nfun
+         IF ( what == 'beta' ) THEN
+            fr2(:) = upf(nt)%beta(1:kkb,lfun(2,ifun)) * rgrid(nt)%r(1:kkb)
+         ELSE
+            fr2(:) = upf(nt)%qfuncl(1:kkb,lfun(2,ifun),lfun(3,ifun))
+         ENDIF
+         CALL filter_prepare( lfun(1,ifun), kkb, rgrid(nt)%r, rgrid(nt)%rab, fr2, qpass, npass, fq(1,ifun) )
+      ENDDO
+      !
+      nfit = 0
+      IF ( rfix > 0.0_DP ) THEN
+         rsel = rfix
+      ELSE
+         jlo = NINT( 0.5_DP/fstep ) ; jhi = NINT( 3.0_DP/fstep )   ! jlo: assumed to fail
+         DO WHILE ( jhi - jlo > 1 )
+            jmid = (jlo+jhi)/2
+            err = 0.0_DP
+            DO ifun = 1, nfun
+               CALL filter_fit( lfun(1,ifun), npass, fq(1,ifun), jmid*fstep*rraw, qpass, qstop, wstop, &
+                                ep, es, 0, dum )
+               nfit = nfit + 1
+               err = MAX( err, ep, es )
+               IF ( err > tol ) EXIT
+            ENDDO
+            IF ( err > tol ) THEN
+               jlo = jmid
+            ELSE
+               jhi = jmid
+            ENDIF
+         ENDDO
+         rsel = jhi*fstep*rraw
+      ENDIF
+      !
+      err = 0.0_DP
+      DO ifun = 1, nfun
+         CALL filter_fit( lfun(1,ifun), npass, fq(1,ifun), rsel, qpass, qstop, wstop, ep, es, nfine, tab(1,ifun) )
+         err = MAX( err, ep, es )
+      ENDDO
+      WRITE( stdout, '(5X,"RS filter: ",A," type",I3,":",I4," functions, raw radius",F8.4,"  sphere",F8.4, &
+           &" bohr (x",F5.3,")  max err",ES9.2,"  tol",ES9.2,"  fits",I5)' ) &
+           what, nt, nfun, rraw, rsel, rsel/rraw, err, tol, nfit
+      IF ( rfix <= 0.0_DP .AND. err > tol ) CALL infomsg( 'filter_species', &
+           'tolerance not reached at the largest sphere: using it anyway' )
+      DEALLOCATE( fq, fr2 )
+      !
+    END SUBROUTINE filter_species
     !
     !------------------------------------------------------------------------
     SUBROUTINE tab_interp( tab, n, x, f, df )
