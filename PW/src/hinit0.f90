@@ -26,7 +26,8 @@ SUBROUTINE hinit0()
   USE beta_mod,         ONLY : init_tab_beta
   USE realus,           ONLY : generate_qpointlist, betapointlist, &
                                init_realspace_vars, real_space
-  USE realus,           ONLY : rs_cost_model, env_real, rs_free_vkb, rs_coarse_setup
+  USE realus,           ONLY : rs_cost_model, env_real, rs_free_vkb, rs_coarse_setup, &
+                               rs_proj_space, rs_proj_margin
   USE uspp,             ONLY : okvan, vkb
   USE control_flags,    ONLY : gamma_only, use_gpu, isolve, lscf, lmd, lbfgs, tstress
   USE noncollin_module, ONLY : noncolin
@@ -178,10 +179,18 @@ SUBROUTINE hinit0()
      npw_g = MAXVAL( ngk(1:nks) )
      CALL mp_sum( npw_g, intra_bgrp_comm )
      CALL mp_max( npw_g, inter_pool_comm )
-     CALL rs_cost_model( npw_g, t_real, t_recip )
-     real_space = ( t_real < 0.9_dp * t_recip )
-     WRITE( stdout, '(5X,"Projectors: estimated cost/band  real space",ES10.3,"  G space",ES10.3, &
-            &"  -> using ",A)' ) t_real, t_recip, TRIM( MERGE( 'real space', 'G space   ', real_space ) )
+     IF ( TRIM(rs_proj_space) == 'auto' ) THEN
+        CALL rs_cost_model( npw_g, t_real, t_recip )
+        real_space = ( t_real < ( 1.0_dp - rs_proj_margin ) * t_recip )
+        WRITE( stdout, '(5X,"Projectors: estimated cost/band  real space",ES10.3,"  G space",ES10.3, &
+               &"  ratio",F6.3,"  (real space if below",F5.2,")  -> using ",A)' ) t_real, t_recip, &
+               t_real/t_recip, 1.0_dp - rs_proj_margin, &
+               TRIM( MERGE( 'real space', 'G space   ', real_space ) )
+     ELSE
+        real_space = ( TRIM(rs_proj_space) == 'real' )
+        WRITE( stdout, '(5X,"Projectors: projector_space = ",A," (set in input) -> using ",A)' ) &
+               TRIM(rs_proj_space), TRIM( MERGE( 'real space', 'G space   ', real_space ) )
+     ENDIF
      ! ... plain SCF: vkb(npwx,nkb) is not kept in memory with real-space projectors
      IF ( real_space .AND. lscf .AND. .NOT. ( lmd .OR. lbfgs .OR. tstress ) .AND. &
           NINT( env_real( 'QE_RS_KEEPVKB', 0.0_dp ) ) /= 1 ) THEN

@@ -60,6 +60,10 @@ MODULE realus
   !! radius QE_RS_GRIDFAC * sqrt(gkcut) instead of 2 * sqrt(gkcut)
   TYPE(fft_type_descriptor) :: dfftc
   LOGICAL :: rs_coarse_allowed = .TRUE.
+  CHARACTER(LEN=16) :: rs_proj_space = 'auto'
+  !! input projector_space: 'auto', 'real' or 'reciprocal'
+  REAL(DP) :: rs_proj_margin = 0.2_DP
+  !! input projector_margin
   REAL(DP) :: rs_gridfac = 1.5_DP
   !! input fft_coarse_factor (env QE_RS_GRIDFAC overrides it, for tests)
   REAL(DP) :: rs_coarse_thr = 1.0D-4
@@ -142,7 +146,7 @@ MODULE realus
   PUBLIC :: rs_cost_model, env_real
   PUBLIC :: rs_becp_push, rs_becp_flush, rs_becp_ready, rs_free_vkb
   PUBLIC :: rs_coarse, rs_update_vc, rs_coarse_check, rs_coarse_setup, vloc_psi_k_coarse
-  PUBLIC :: rs_gridfac, rs_coarse_thr
+  PUBLIC :: rs_gridfac, rs_coarse_thr, rs_proj_space, rs_proj_margin
   !
   CONTAINS
   
@@ -1414,13 +1418,13 @@ MODULE realus
       REAL(DP), INTENT(OUT) :: c_real, c_recip, t_fft
       INTEGER, PARAMETER :: np = 1536, nk = 256, mz = 32   ! G-space sample: npw x nkb x bands
       INTEGER, PARAMETER :: mb = 640, nhs = 16, nat_s = 24, nb = 16   ! real-space sample
-      INTEGER, PARAMETER :: nrep = 4
+      INTEGER, PARAMETER :: nrep = 12
       COMPLEX(DP), PARAMETER :: one = (1.0_DP,0.0_DP), zero = (0.0_DP,0.0_DP)
       COMPLEX(DP), ALLOCATABLE :: v(:,:), p(:,:), b(:,:), src(:), dst(:)
       REAL(DP), ALLOCATABLE :: bs(:,:), w(:,:), bec(:,:), o(:,:)
       INTEGER, ALLOCATABLE :: idx(:)
       INTEGER(KIND=8) :: c0, c1, rate
-      REAL(DP) :: t, tbest, tot(3)
+      REAL(DP) :: tb(3), tot(3)
       INTEGER :: irep, i, j, ia, ib, nsrc
       !
       CALL start_clock( 'rs_calibrate' )
@@ -1438,16 +1442,6 @@ MODULE realus
             p(i,j) = CMPLX( COS(0.23_DP*i*j), SIN(0.19_DP*i+j), KIND=DP )
          ENDDO
       ENDDO
-      CALL mp_barrier( intra_image_comm )
-      tbest = HUGE(1.0_DP)
-      DO irep = 1, nrep
-         CALL SYSTEM_CLOCK( c0 )
-         CALL ZGEMM( 'C', 'N', nk, mz, np, one, v, np, p, np, zero, b, nk )
-         CALL SYSTEM_CLOCK( c1 )
-         tbest = MIN( tbest, DBLE(c1-c0)/DBLE(rate) )
-      ENDDO
-      c_recip = 3.0_DP * tbest / ( DBLE(np) * DBLE(nk) * DBLE(mz) )
-      DEALLOCATE( v, p, b )
       !
       ! ... real-space sample: nat_s atoms with mb sphere points and nhs projectors each,
       ! ... a block of nb bands: gather, projection, V_NL and S application, scatter
@@ -1466,9 +1460,21 @@ MODULE realus
          src(i) = CMPLX( SIN(0.01_DP*i), COS(0.02_DP*i), KIND=DP )
       ENDDO
       dst = zero
-      CALL mp_barrier( intra_image_comm )
-      tbest = HUGE(1.0_DP)
+      psic(1:dffts%nnr) = (1.0D-3,0.0_DP)
+      !
+      ! ... the three samples are interleaved and repeated, and the best time of each
+      ! ... is kept: other load on the machine then affects them alike, so that their
+      ! ... ratios - which is what the choice depends on - are steadier
+      tb(:) = HUGE(1.0_DP)
       DO irep = 1, nrep
+         CALL mp_barrier( intra_image_comm )
+         !
+         ! ... G-space sample: one ZGEMM sweep <beta|psi>; the three sweeps cost the same
+         CALL SYSTEM_CLOCK( c0 )
+         CALL ZGEMM( 'C', 'N', nk, mz, np, one, v, np, p, np, zero, b, nk )
+         CALL SYSTEM_CLOCK( c1 )
+         tb(2) = MIN( tb(2), DBLE(c1-c0)/DBLE(rate) )
+         !
          CALL SYSTEM_CLOCK( c0 )
          DO ib = 1, nb
             DO i = 1, mb*nat_s
@@ -1489,24 +1495,21 @@ MODULE realus
             ENDDO
          ENDDO
          CALL SYSTEM_CLOCK( c1 )
-         tbest = MIN( tbest, DBLE(c1-c0)/DBLE(rate) )
-      ENDDO
-      c_real = tbest / ( DBLE(mb*nat_s) * DBLE(nhs) * DBLE(nb) )
-      DEALLOCATE( bs, w, bec, o, idx, src, dst )
-      !
-      ! ... one smooth-grid wavefunction FFT (collective over the band group)
-      psic(1:dffts%nnr) = (1.0D-3,0.0_DP)
-      CALL mp_barrier( intra_image_comm )
-      tbest = HUGE(1.0_DP)
-      DO irep = 1, nrep
+         tb(1) = MIN( tb(1), DBLE(c1-c0)/DBLE(rate) )
+         !
+         ! ... one smooth-grid wavefunction FFT (collective over the band group)
+         CALL mp_barrier( intra_image_comm )
          CALL SYSTEM_CLOCK( c0 )
          CALL invfft( 'Wave', psic, dffts )
          CALL fwfft( 'Wave', psic, dffts )
          CALL SYSTEM_CLOCK( c1 )
-         tbest = MIN( tbest, 0.5_DP*DBLE(c1-c0)/DBLE(rate) )
+         tb(3) = MIN( tb(3), 0.5_DP*DBLE(c1-c0)/DBLE(rate) )
       ENDDO
-      t_fft = tbest * DBLE(nproc_bgrp)
+      c_real  = tb(1) / ( DBLE(mb*nat_s) * DBLE(nhs) * DBLE(nb) )
+      c_recip = 3.0_DP * tb(2) / ( DBLE(np) * DBLE(nk) * DBLE(mz) )
+      t_fft   = tb(3) * DBLE(nproc_bgrp)
       psic(1:dffts%nnr) = zero
+      DEALLOCATE( v, p, b, bs, w, bec, o, idx, src, dst )
       !
       ! ... same numbers on every rank
       tot = (/ c_real, c_recip, t_fft /)

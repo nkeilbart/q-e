@@ -348,7 +348,8 @@ SUBROUTINE control_iosys()
 
   USE Coul_cut_2D,  ONLY :  do_cutoff_2D 
 
-  USE realus,                ONLY : real_space_ => real_space, rs_gridfac, rs_coarse_thr
+  USE realus,                ONLY : real_space_ => real_space, rs_gridfac, rs_coarse_thr, &
+                                    rs_proj_space, rs_proj_margin
 
   USE qmmm,                  ONLY : qmmm_config
   !
@@ -395,6 +396,7 @@ SUBROUTINE control_iosys()
                                mixing_ndim, mixing_fixed_ns, conv_thr,     &
                                tqr, tq_smoothing, tbeta_smoothing,         &
                                fft_coarse_factor, fft_coarse_thr,          &
+                               projector_space, projector_margin,          &
                                diago_thr_init,                             &
                                diago_cg_maxiter,                           &
                                diago_david_ndim, diago_rmm_ndim,           &
@@ -1273,6 +1275,15 @@ SUBROUTINE control_iosys()
   tq_smoothing_ = tq_smoothing
   rs_gridfac    = fft_coarse_factor
   rs_coarse_thr = fft_coarse_thr
+  SELECT CASE( TRIM( projector_space ) )
+  CASE( 'auto', 'real', 'reciprocal' )
+     rs_proj_space = TRIM( projector_space )
+  CASE DEFAULT
+     CALL errore( 'iosys', 'projector_space must be auto, real or reciprocal', 1 )
+  END SELECT
+  IF ( projector_margin < 0.0_DP .OR. projector_margin >= 1.0_DP ) &
+     CALL errore( 'iosys', 'projector_margin must be in [0,1)', 1 )
+  rs_proj_margin = projector_margin
   tbeta_smoothing_ = tbeta_smoothing
   !
   ! SYMMETRY

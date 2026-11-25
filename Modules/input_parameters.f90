@@ -1036,6 +1036,15 @@ MODULE input_parameters
 
         LOGICAL :: tq_smoothing = .false.
 
+        CHARACTER(len=80) :: projector_space = 'auto'
+          !! 'auto': real-space or G-space nonlocal projectors, whichever is estimated
+          !! to be cheaper from timings taken at start-up; 'real' / 'reciprocal': fixed
+          !! choice (use it when run-to-run reproducibility of the choice is needed)
+
+        REAL(DP) :: projector_margin = 0.2_DP
+          !! with projector_space='auto', real-space projectors are used only if their
+          !! estimated cost is lower than the G-space cost by at least this fraction
+
         REAL(DP) :: fft_coarse_factor = 1.5_DP
           !! the first scf iterations apply V_loc (and real-space projectors) on a
           !! coarser FFT grid holding the G sphere of radius fft_coarse_factor*sqrt(gkcut);
@@ -1090,6 +1099,7 @@ MODULE input_parameters
           mixing_mode, mixing_beta, mixing_ndim, mixing_fixed_ns,      &
           tqr, tq_smoothing, tbeta_smoothing,                          &
           fft_coarse_factor, fft_coarse_thr,                           &
+          projector_space, projector_margin,                           &
           diago_cg_maxiter, diago_david_ndim, diago_rmm_ndim,          &
           diago_rmm_conv, diago_gs_nblock, diagonalization,            &
           startingpot, startingwfc , conv_thr,                         &

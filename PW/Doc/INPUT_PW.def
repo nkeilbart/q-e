@@ -2791,6 +2791,37 @@ input_description -distribution {Quantum ESPRESSO} -package PWscf -program pw.x 
     }
 
 
+    var projector_space -type CHARACTER {
+        default { 'auto' }
+        options {
+            info {
+                How the nonlocal projectors are applied in ultrasoft/PAW k-point CPU
+                scf runs handled by the automatic real-space machinery:
+            }
+            opt -val 'auto' {
+                real-space (filtered) or G-space projectors, whichever is estimated to
+                be cheaper from short timings taken at start-up. Near break-even the
+                choice, and with it the last digits of the result, can differ from
+                run to run.
+            }
+            opt -val 'real' {
+                always real-space (filtered) projectors
+            }
+            opt -val 'reciprocal' {
+                always G-space projectors
+            }
+        }
+    }
+
+    var projector_margin -type REAL {
+        default { 0.2 }
+        info {
+            With @ref projector_space = 'auto', real-space projectors are used only
+            if their estimated cost is lower than the G-space cost by at least this
+            fraction.
+        }
+    }
+
     var fft_coarse_factor -type REAL {
         default { 1.5 }
         info {

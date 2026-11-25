@@ -1163,6 +1163,8 @@ MODULE read_namelists_module
        CALL mp_bcast( tq_smoothing,         ionode_id, intra_image_comm )
        CALL mp_bcast( fft_coarse_factor,    ionode_id, intra_image_comm )
        CALL mp_bcast( fft_coarse_thr,       ionode_id, intra_image_comm )
+       CALL mp_bcast( projector_space,      ionode_id, intra_image_comm )
+       CALL mp_bcast( projector_margin,     ionode_id, intra_image_comm )
        CALL mp_bcast( tbeta_smoothing,      ionode_id, intra_image_comm )
        CALL mp_bcast( diagonalization,      ionode_id, intra_image_comm )
        CALL mp_bcast( diago_thr_init,       ionode_id, intra_image_comm )
