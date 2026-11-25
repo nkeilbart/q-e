@@ -33,6 +33,7 @@ SUBROUTINE data_structure( gamma_only )
   USE symm_base,  ONLY : fft_fact
   USE command_line_options, ONLY: pencil_decomposition_
   USE command_line_options, ONLY : nmany_
+  USE control_flags,        ONLY : many_fft
   !
   IMPLICIT NONE
   !
@@ -82,6 +83,22 @@ SUBROUTINE data_structure( gamma_only )
   IF (.NOT.doublegrid) dfftp%grid_id = dffts%grid_id
   !
   CALL fft_base_info( ionode, stdout )
+  !
+#if !defined(__CUDA)
+  ! ... CPU: batch nmany_ wavefunction FFTs in vloc_psi and sum_band (the
+  ! ... many_fft paths written for GPUs), so that each batch needs a single
+  ! ... combined all-to-all exchange instead of one per band. The parallel
+  ! ... FFT driver supports batching (many_cft3s) only with pencil
+  ! ... decomposition; the serial driver (cfft3ds) always does.
+  ! ... Enabled with "-nh N" (alias "-howmany N"; sets nmany_) plus
+  ! ... "-pd .true." when running in parallel.
+  IF ( nmany_ > 1 .AND. ( .NOT. lpara .OR. pencil_decomposition_ ) &
+       .AND. .NOT. dffts%has_task_groups ) THEN
+     many_fft = nmany_
+     WRITE( stdout, '(5X,"Batched wavefunction FFTs on CPU: many_fft = ",I4)' ) many_fft
+  ENDIF
+#endif
+  !
   ngs_ = dffts%ngl( dffts%mype + 1 )
   ngm_ = dfftp%ngl( dfftp%mype + 1 )
   !
