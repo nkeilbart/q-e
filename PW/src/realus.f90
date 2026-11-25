@@ -53,6 +53,12 @@ MODULE realus
   !
   LOGICAL :: real_space = .FALSE.
   INTEGER :: rs_block = 1
+  LOGICAL :: lqfilter = .FALSE.
+  !! (prototype, env QE_RQ_FILTER=1) real-space augmentation functions (tqr)
+  !! are replaced by filtered ones, see filter_radial
+  INTEGER, PARAMETER :: nqfine = 3201
+  REAL(DP), ALLOCATABLE :: qftab(:,:,:,:)
+  !! (nqfine, 0:lmax, nbeta*(nbeta+1)/2, nsp) radial tables of the filtered Q
   !! (prototype, env QE_RS_BLOCK) >1: k-point real-space projectors are applied
   !! to rs_block bands at a time (h_psi_rs_k_block, s_psi_rs_k_block)
   !! if true perform calculations in real space
@@ -238,6 +244,8 @@ MODULE realus
       USE fft_types,  ONLY : fft_type_descriptor
       USE mp_bands,   ONLY : intra_bgrp_comm
       USE mp,         ONLY : mp_sum
+      USE gvect,      ONLY : ecutrho
+      USE cell_base,  ONLY : tpiba
       !
       IMPLICIT NONE
       !
@@ -254,6 +262,9 @@ MODULE realus
       REAL(DP), ALLOCATABLE :: boxdist(:), xyz(:,:), diff(:)
       REAL(DP)              :: mbr, mbx, mby, mbz, dmbx, dmby, dmbz, aux
       REAL(DP)              :: inv_nr1, inv_nr2, inv_nr3, boxradsq_ia, boxrad_ia
+      REAL(DP)              :: rfacq, gnyq, qpassq, qstopq, wstopq
+      INTEGER               :: l, nb, mb, nbt
+      CHARACTER(LEN=32)     :: envname, flabel
       !
       initialisation_level = 3
       IF ( .not. okvan ) RETURN
@@ -291,6 +302,45 @@ MODULE realus
          ENDDO
          !
          boxrad(:) = boxrad(:) / alat
+         !
+         lqfilter = ( NINT( env_real( 'QE_RQ_FILTER', 0.0_DP ) ) == 1 )
+         IF ( lqfilter ) THEN
+            rfacq  = env_real( 'QE_RQ_RFAC', 1.0_DP )
+            DO nt = 1, nsp
+               WRITE( envname, '("QE_RQ_RFAC_",I0)' ) nt
+               boxrad(nt) = boxrad(nt) * env_real( TRIM(envname), rfacq )
+            ENDDO
+            gnyq   = tpiba * 0.5_DP * MIN( dfft%nr1*SQRT(SUM(bg(:,1)**2)), &
+                                           dfft%nr2*SQRT(SUM(bg(:,2)**2)), &
+                                           dfft%nr3*SQRT(SUM(bg(:,3)**2)) )
+            qpassq = env_real( 'QE_RQ_QPASS', 0.8_DP ) * SQRT(ecutrho)
+            qstopq = env_real( 'QE_RQ_QSTOP', (2.0_DP*gnyq - qpassq)/SQRT(ecutrho) ) * SQRT(ecutrho)
+            wstopq = env_real( 'QE_RQ_WSTOP', 1.0_DP )
+            WRITE( stdout, '(5X,"RS Q filter: radii (bohr)",10F8.4)' ) boxrad(:)*alat
+            WRITE( stdout, '(5X,"RS Q filter: qpass=",F8.4," qstop=",F8.4," wstop=",ES9.2,"  sqrt(ecutrho)=",F8.4, &
+                   &"  G_nyq(dense)=",F8.4)' ) qpassq, qstopq, wstopq, SQRT(ecutrho), gnyq
+            IF ( ALLOCATED(qftab) ) DEALLOCATE( qftab )
+            nbt = MAXVAL( upf(1:nsp)%nbeta )
+            ALLOCATE( qftab( nqfine, 0:MAXVAL(upf(1:nsp)%nqlc)-1, nbt*(nbt+1)/2, nsp ) )
+            qftab = 0.0_DP
+            DO nt = 1, nsp
+               IF ( .not. upf(nt)%tvanp ) CYCLE
+               DO l = 0, upf(nt)%nqlc - 1
+                  DO nb = 1, upf(nt)%nbeta
+                     DO mb = nb, upf(nt)%nbeta
+                        ijv = mb * (mb-1) /2 + nb
+                        IF ( .not. ( l >= abs( upf(nt)%lll(nb) - upf(nt)%lll(mb) ) .and. &
+                                     l <= upf(nt)%lll(nb) + upf(nt)%lll(mb)        .and. &
+                                     mod( l + upf(nt)%lll(nb) + upf(nt)%lll(mb), 2 ) == 0 ) ) CYCLE
+                        WRITE( flabel, '("Q type",I2," ij",I3)' ) nt, ijv
+                        CALL filter_radial( flabel, l, upf(nt)%kkbeta, rgrid(nt)%r, rgrid(nt)%rab, &
+                                            upf(nt)%qfuncl(1:upf(nt)%kkbeta,ijv,l), boxrad(nt)*alat, &
+                                            qpassq, qstopq, wstopq, nqfine, qftab(1,l,ijv,nt) )
+                     ENDDO
+                  ENDDO
+               ENDDO
+            ENDDO
+         ENDIF
          !
       ENDIF
 #if defined(__DEBUG)
@@ -462,7 +512,7 @@ MODULE realus
       USE uspp_param, ONLY : upf, lmaxq, nh
       USE atom,       ONLY : rgrid
       USE splinelib,  ONLY : spline, splint
-      USE cell_base,  ONLY : omega
+      USE cell_base,  ONLY : omega, alat
       USE fft_base,   ONLY : dfftp
       !
       IMPLICIT NONE
@@ -566,7 +616,12 @@ MODULE realus
                   !
                   ! ... spline interpolation
                   !
-                  qtot_int = splint( xsp, qtot, wsp, tab(ia)%dist(ir) )
+                  IF ( lqfilter ) THEN
+                     CALL tab_interp( qftab(1,l,ijv,nt), nqfine, &
+                          tab(ia)%dist(ir) * (nqfine-1) / (boxrad(nt)*alat), qtot_int, first )
+                  ELSE
+                     qtot_int = splint( xsp, qtot, wsp, tab(ia)%dist(ir) )
+                  ENDIF
                   !
                   ijh = 0
                   DO ih = 1, nh(nt)
@@ -625,6 +680,7 @@ MODULE realus
       !! This routine follows the same logic of \(\texttt{real_space_q}\).
       !
       USE constants,  ONLY : eps8, eps16
+      USE cell_base,  ONLY : alat
       USE uspp,       ONLY : indv, nhtolm, ap
       USE uspp_param, ONLY : upf, lmaxq, nh
       USE atom,       ONLY : rgrid
@@ -736,8 +792,14 @@ MODULE realus
                   !
                   ! ... spline interpolation
                   !
+                  IF ( lqfilter ) THEN
+                     CALL tab_interp( qftab(1,l,ijv,nt), nqfine, &
+                          tabp(ia)%dist(ir) * (nqfine-1) / (boxrad(nt)*alat), qtot_int, dqtot_int )
+                     dqtot_int = dqtot_int * (nqfine-1) / (boxrad(nt)*alat)
+                  ELSE
                   qtot_int = splint( xsp, qtot, wsp(:,1), tabp(ia)%dist(ir) )
                   dqtot_int= splint( xsp,dqtot, wsp(:,2), tabp(ia)%dist(ir) )
+                  ENDIF
                   !
                   ! ... prevent floating-point error if dist = 0
                   !
@@ -840,7 +902,8 @@ MODULE realus
       ! ... filtered (optimised) real-space projectors: prototype, see filter_beta
       LOGICAL               :: lfilter
       INTEGER               :: nbt, i0
-      CHARACTER(LEN=32)     :: envname
+      CHARACTER(LEN=32)     :: envname, flabel
+      REAL(DP), ALLOCATABLE :: fr2(:)
       INTEGER, PARAMETER    :: nfine = 3201  ! radial table of the filtered projectors
       REAL(DP)              :: rfac, qpass, qstop, wstop, gnyq, drf, xr, tt
       REAL(DP), ALLOCATABLE :: ftab(:,:,:), frad(:)
@@ -1087,8 +1150,12 @@ MODULE realus
          DO nt = 1, nsp
             IF ( .not. upf(nt)%tvanp ) CYCLE
             DO nb = 1, upf(nt)%nbeta
-               CALL filter_beta( nt, nb, boxrad_beta(nt)*alat, qpass, qstop, wstop, &
-                                 nfine, ftab(1,nb,nt) )
+               WRITE( flabel, '("beta type",I3," nb",I3)' ) nt, nb
+               ALLOCATE( fr2(upf(nt)%kkbeta) )
+               fr2(:) = upf(nt)%beta(1:upf(nt)%kkbeta,nb) * rgrid(nt)%r(1:upf(nt)%kkbeta)
+               CALL filter_radial( flabel, upf(nt)%lll(nb), upf(nt)%kkbeta, rgrid(nt)%r, rgrid(nt)%rab, &
+                                   fr2, boxrad_beta(nt)*alat, qpass, qstop, wstop, nfine, ftab(1,nb,nt) )
+               DEALLOCATE( fr2 )
             ENDDO
          ENDDO
       ENDIF
@@ -1214,39 +1281,33 @@ MODULE realus
     END FUNCTION env_real
     !
     !------------------------------------------------------------------------
-    SUBROUTINE filter_beta( nt, nb, rmax, qpass, qstop, wstop, nfine, chi )
+    SUBROUTINE filter_radial( label, l, kkb, r, rab, fr2, rmax, qpass, qstop, wstop, nfine, chi )
       !------------------------------------------------------------------------
-      !! Optimised real-space projector for radial beta function nb of species nt
-      !! (in the spirit of King-Smith, Payne and Lin, PRB 44, 13063 (1991)).
-      !! The projector chi(r) is strictly confined to r < rmax and expanded as
+      !! Optimised real-space version of a radial function f(r) of angular
+      !! momentum l given on a radial grid as fr2 = f(r)*r^2 (in the spirit of
+      !! King-Smith, Payne and Lin, PRB 44, 13063 (1991)).
+      !! chi(r) is strictly confined to r < rmax and expanded as
       !!    chi(r) = sum_n c_n j_l(k_n r),   j_l(k_n rmax) = 0
       !! The c_n minimise
-      !!    int_0^qpass q^2 |chi(q)-beta(q)|^2 dq + wstop int_qstop^qend q^2 |chi(q)|^2 dq
-      !! chi(q) = int_0^rmax chi(r) j_l(qr) r^2 dr. For qpass < q < qstop chi(q) is
-      !! free: those components neither act on the wavefunctions (|k+G|<=qpass)
-      !! nor alias back onto them on the smooth grid (q < 2 G_nyq - qpass).
+      !!    int_0^qpass q^2 |chi(q)-f(q)|^2 dq + wstop int_qstop^qend q^2 |chi(q)|^2 dq
+      !! with chi(q) = int_0^rmax chi(r) j_l(qr) r^2 dr. For qpass < q < qstop
+      !! chi(q) is free. Output: chi on the uniform grid r_i=(i-1)*rmax/(nfine-1).
       !
-      USE atom,       ONLY : rgrid
-      USE uspp_param, ONLY : upf
-      USE mp_bands,   ONLY : me_bgrp
-      !
-      INTEGER, INTENT(IN)   :: nt, nb, nfine
+      CHARACTER(LEN=*), INTENT(IN) :: label
+      INTEGER, INTENT(IN)   :: l, kkb, nfine
+      REAL(DP), INTENT(IN)  :: r(kkb), rab(kkb), fr2(kkb)
       REAL(DP), INTENT(IN)  :: rmax, qpass, qstop, wstop
       REAL(DP), INTENT(OUT) :: chi(nfine)
-      !! chi(r) on the uniform grid r_i = (i-1)*rmax/(nfine-1)
       !
-      INTEGER, PARAMETER :: nbasx = 128
-      INTEGER  :: nbas
-      REAL(DP) :: kzero(nbasx), coef(nbasx)
+      INTEGER, PARAMETER :: nbasx = 160, nfit = 801
       REAL(DP), PARAMETER :: dqp = 0.05_DP, dqs = 0.10_DP
-      INTEGER  :: l, kkb, i, n, ir, npass, nst, nrow, info, lwork, rank
-      REAL(DP) :: dr, x, x0, x1, f0, f1, fm, xm, q, qend, qbas, w, val, epass, estop, eraw, bnorm
+      INTEGER  :: nbas, i, n, ir, npass, nst, nrow, info, lwork, rank
+      REAL(DP) :: kzero(nbasx), coef(nbasx)
+      REAL(DP) :: dr, x0, x1, f0, f1, fm, xm, q, qend, qbas, w, val, epass, estop, eraw, bnorm
       REAL(DP) :: xx(1), ff(1)
       REAL(DP), ALLOCATABLE :: rf(:), wf(:), fb(:,:), jl(:), a(:,:), a0(:,:), b(:), b0(:), &
                                sv(:), work(:), aux(:), jlg(:), bq(:), res(:)
       !
-      l   = upf(nt)%lll(nb)
-      kkb = upf(nt)%kkbeta
       qend = 3.0_DP * qstop
       qbas = 1.5_DP * qstop
       !
@@ -1259,7 +1320,6 @@ MODULE realus
          IF ( x1 > qbas*rmax ) EXIT
          CALL sph_bes( 1, xx, x1, l, ff ) ; f1 = ff(1)
          IF ( f0*f1 <= 0.0_DP ) THEN
-            ! bisection
             DO i = 1, 60
                xm = 0.5_DP*(x0+x1)
                CALL sph_bes( 1, xx, xm, l, ff ) ; fm = ff(1)
@@ -1278,15 +1338,15 @@ MODULE realus
       ENDDO
       !
       ! ... uniform radial grid on [0,rmax] with simpson weights (times r^2)
-      ALLOCATE( rf(nfine), wf(nfine), fb(nfine,nbas), jl(nfine) )
-      dr = rmax / (nfine-1)
-      DO ir = 1, nfine
+      ALLOCATE( rf(nfit), wf(nfit), fb(nfit,nbas), jl(nfit) )
+      dr = rmax / (nfit-1)
+      DO ir = 1, nfit
          rf(ir) = (ir-1)*dr
          wf(ir) = MERGE( 4.0_DP, 2.0_DP, MOD(ir,2) == 0 ) * dr/3.0_DP * rf(ir)**2
       ENDDO
-      wf(1) = 0.0_DP ; wf(nfine) = dr/3.0_DP * rf(nfine)**2
+      wf(1) = 0.0_DP ; wf(nfit) = dr/3.0_DP * rf(nfit)**2
       DO n = 1, nbas
-         CALL sph_bes( nfine, rf, kzero(n), l, fb(1,n) )
+         CALL sph_bes( nfit, rf, kzero(n), l, fb(1,n) )
       ENDDO
       !
       npass = NINT( qpass/dqp ) + 1
@@ -1302,12 +1362,12 @@ MODULE realus
             q = qstop + (i-npass-1) * (qend-qstop)/(nst-1)
             w = q * SQRT( wstop * (qend-qstop)/(nst-1) )
          ENDIF
-         ! beta(q) of the original projector (upf%beta is r*beta(r))
-         CALL sph_bes( kkb, rgrid(nt)%r, q, l, jlg )
-         aux(1:kkb) = upf(nt)%beta(1:kkb,nb) * jlg(1:kkb) * rgrid(nt)%r(1:kkb)
-         CALL simpson( kkb, aux, rgrid(nt)%rab, val )
+         ! f(q) of the original function
+         CALL sph_bes( kkb, r, q, l, jlg )
+         aux(1:kkb) = fr2(1:kkb) * jlg(1:kkb)
+         CALL simpson( kkb, aux, rab, val )
          bq(i) = val * q
-         CALL sph_bes( nfine, rf, q, l, jl )
+         CALL sph_bes( nfit, rf, q, l, jl )
          DO n = 1, nbas
             a(i,n) = w * SUM( wf(:) * fb(:,n) * jl(:) )
          ENDDO
@@ -1317,23 +1377,53 @@ MODULE realus
       lwork = 20*( nrow + nbas ) + 1000
       ALLOCATE( work(lwork) )
       CALL DGELSS( nrow, nbas, 1, a, nrow, b, MAX(nrow,nbas), sv, 1.0D-11, rank, work, lwork, info )
-      IF ( info /= 0 ) CALL errore( 'filter_beta', 'DGELSS failed', ABS(info) )
+      IF ( info /= 0 ) CALL errore( 'filter_radial', 'DGELSS failed', ABS(info) )
       coef(1:nbas) = b(1:nbas)
-      chi(:) = MATMUL( fb(:,1:nbas), coef(1:nbas) )
+      !
+      ! ... chi on the output grid
+      DEALLOCATE( rf, jl )
+      ALLOCATE( rf(nfine), jl(nfine) )
+      DO ir = 1, nfine
+         rf(ir) = (ir-1) * rmax / (nfine-1)
+      ENDDO
+      chi(:) = 0.0_DP
+      DO n = 1, nbas
+         CALL sph_bes( nfine, rf, kzero(n), l, jl )
+         chi(:) = chi(:) + coef(n) * jl(:)
+      ENDDO
       !
       ! ... diagnostics: relative pass-band error, stop-band leakage (filtered and raw)
       res(:) = MATMUL( a0, coef(1:nbas) ) - b0(:)
-      bnorm = SUM( b0(1:npass)**2 )
+      bnorm = MAX( SUM( b0(1:npass)**2 ), 1.0D-300 )
       epass = SQRT( SUM( res(1:npass)**2 ) / bnorm )
       estop = SQRT( SUM( res(npass+1:nrow)**2 ) / wstop / bnorm )
       eraw  = SQRT( SUM( bq(npass+1:nrow)**2 ) * (qend-qstop)/(nst-1) / bnorm )
-      IF ( me_bgrp == 0 ) WRITE( stdout, '(5X,"RS filter: type",I3," beta",I3," l=",I1," R=",F7.4, &
-           &" nbas=",I3," rank=",I3,"  pass err=",ES9.2,"  stop leak=",ES9.2,"  (raw beta leak=",ES9.2,")")' ) &
-           nt, nb, l, rmax, nbas, rank, epass, estop, eraw
+      WRITE( stdout, '(5X,"RS filter: ",A," l=",I1," R=",F7.4, &
+           &" nbas=",I3," rank=",I3,"  pass err=",ES9.2,"  stop leak=",ES9.2,"  (raw leak=",ES9.2,")")' ) &
+           TRIM(label), l, rmax, nbas, rank, epass, estop, eraw
       !
       DEALLOCATE( rf, wf, fb, jl, a, a0, b, b0, bq, sv, aux, jlg, res, work )
       !
-    END SUBROUTINE filter_beta
+    END SUBROUTINE filter_radial
+    !
+    !------------------------------------------------------------------------
+    SUBROUTINE tab_interp( tab, n, x, f, df )
+      !! 4-point Lagrange interpolation of a table on a uniform grid of unit
+      !! spacing (tab(i) <-> x=i-1); f = value, df = derivative with respect to x
+      INTEGER, INTENT(IN)   :: n
+      REAL(DP), INTENT(IN)  :: tab(n), x
+      REAL(DP), INTENT(OUT) :: f, df
+      INTEGER  :: i0
+      REAL(DP) :: t
+      i0 = MIN( MAX( INT(x), 1 ), n-3 )
+      t  = x - DBLE(i0-1)
+      f  = - tab(i0  ) * (t-1)*(t-2)*(t-3) / 6.0_DP + tab(i0+1) * t*(t-2)*(t-3) / 2.0_DP &
+           - tab(i0+2) * t*(t-1)*(t-3) / 2.0_DP     + tab(i0+3) * t*(t-1)*(t-2) / 6.0_DP
+      df = - tab(i0  ) * ( (t-2)*(t-3) + (t-1)*(t-3) + (t-1)*(t-2) ) / 6.0_DP &
+           + tab(i0+1) * ( (t-2)*(t-3) + t*(t-3) + t*(t-2) ) / 2.0_DP &
+           - tab(i0+2) * ( (t-1)*(t-3) + t*(t-3) + t*(t-1) ) / 2.0_DP &
+           + tab(i0+3) * ( (t-1)*(t-2) + t*(t-2) + t*(t-1) ) / 6.0_DP
+    END SUBROUTINE tab_interp
     !
     SUBROUTINE beta_box_breaking (nat, maxbox_beta)
       !! This routine determines whether it is needed to re-shuffle the
