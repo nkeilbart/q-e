@@ -122,7 +122,7 @@ SUBROUTINE sum_bec ( ik, current_spin, ibnd_start, ibnd_end, this_bgrp_nbnd )
   USE realus,             ONLY : real_space, &
                                  invfft_orbital_gamma, calbec_rs_gamma, &
                                  invfft_orbital_k, calbec_rs_k, &
-                                 rs_block, calbec_rs_k_block
+                                 rs_block, calbec_rs_k_block, rs_becp_ready
   USE us_exx,             ONLY : store_becxx0
   USE mp_bands,           ONLY : nbgrp,inter_bgrp_comm
   USE mp,                 ONLY : mp_sum
@@ -158,8 +158,12 @@ SUBROUTINE sum_bec ( ik, current_spin, ibnd_start, ibnd_end, this_bgrp_nbnd )
         !$acc update device(becp%r)
      else
         current_k = ik
-        becp%k = (0.d0,0.d0)
-        if ( rs_block > 1 ) then
+        if ( .not. rs_becp_ready ) becp%k = (0.d0,0.d0)
+        if ( rs_becp_ready ) then
+           ! becp%k already computed in the density loop of sum_band
+           rs_becp_ready = .false.
+        else if ( rs_block > 1 ) then
+           becp%k = (0.d0,0.d0)
            call calbec_rs_k_block( evc, ibnd_start, this_bgrp_nbnd )
         else
         do kbnd = 1, this_bgrp_nbnd

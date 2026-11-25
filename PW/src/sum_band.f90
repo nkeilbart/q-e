@@ -418,6 +418,7 @@ SUBROUTINE sum_band()
        USE uspp_init,              ONLY : init_us_2
        USE klist,                  ONLY : nelec
        USE control_flags,          ONLY : many_fft
+       USE realus,                 ONLY : real_space, rs_block, rs_becp_push, rs_becp_flush
        USE wavefunctions,          ONLY : psic_nc
        !! psic_nc is allocated work space for noncolinear case
        !! FIXME: too many work spaces!
@@ -566,6 +567,11 @@ SUBROUTINE sum_band()
                 !
                 CALL wave_g2r( evc(1:npw,ibnd:ibnd), psicd, dffts, igk=igk_k(:,ik) )
                 !
+                ! ... real-space projectors: <beta|psi> from the same real-space psi
+                !
+                IF ( okvan .AND. real_space .AND. rs_block > 1 ) &
+                   CALL rs_becp_push( psicd, ik, ibnd-ibnd_start+1, this_bgrp_nbnd )
+                !
                 ! ... increment the charge density ...
                 !
                 CALL get_rho_k( rho%of_r(:,current_spin), dffts%nnr, w1, psicd )
@@ -594,6 +600,8 @@ SUBROUTINE sum_band()
           !
           ! ... If we have a US pseudopotential we compute here the becsum term
           !
+          IF ( okvan .AND. real_space .AND. rs_block > 1 .AND. .NOT. noncolin ) &
+             CALL rs_becp_flush( final=.TRUE. )
           IF ( okvan ) CALL sum_bec ( ik, current_spin, ibnd_start,ibnd_end,this_bgrp_nbnd ) 
           !
        END DO k_loop

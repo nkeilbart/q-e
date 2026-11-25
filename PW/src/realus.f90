@@ -53,6 +53,10 @@ MODULE realus
   !
   LOGICAL :: real_space = .FALSE.
   INTEGER :: rs_block = 1
+  LOGICAL :: rs_becp_ready = .FALSE.
+  !! .true. if becp%k was filled by rs_becp_push/flush (sum_band density loop)
+  REAL(DP), ALLOCATABLE :: pb_w(:,:)
+  INTEGER :: pb_n = 0, pb_first = 0
   LOGICAL :: lqfilter = .FALSE.
   !! (prototype, env QE_RQ_FILTER=1) real-space augmentation functions (tqr)
   !! are replaced by filtered ones, see filter_radial
@@ -119,6 +123,7 @@ MODULE realus
             fwfft_orbital_k, s_psir_k, calbec_rs_k, add_vuspsir_k
   PUBLIC :: rs_block, h_psi_rs_k_block, s_psi_rs_k_block, calbec_rs_k_block
   PUBLIC :: rs_cost_model, env_real
+  PUBLIC :: rs_becp_push, rs_becp_flush, rs_becp_ready
   !
   CONTAINS
   
@@ -3262,6 +3267,89 @@ MODULE realus
     DEALLOCATE( psib, wblk, outb, bec2, w2 )
     !
   END SUBROUTINE h_psi_rs_k_block
+  !
+  !--------------------------------------------------------------------------
+  SUBROUTINE rs_becp_push( psir, ik, kbnd, nbnd_tot )
+    !--------------------------------------------------------------------------
+    !! Collects <beta|psi> for a band that is already in real space (psir on
+    !! the smooth grid, as in the density loop of sum_band), so that no extra
+    !! FFT is needed for becsum. Bands are buffered rs_block at a time; the
+    !! projection is done when the buffer is full and by rs_becp_flush.
+    !! Result goes to becp%k(:,kbnd), kbnd = 1..nbnd_tot.
+    !
+    IMPLICIT NONE
+    !
+    COMPLEX(DP), INTENT(IN) :: psir(:)
+    INTEGER, INTENT(IN) :: ik, kbnd, nbnd_tot
+    INTEGER :: ir
+    COMPLEX(DP) :: z
+    !
+    IF ( .NOT. ALLOCATED(pb_w) ) THEN
+       ALLOCATE( pb_w(MAX(boxtot,1),2*rs_block) )
+       pb_n = 0
+    ENDIF
+    IF ( pb_n == 0 ) pb_first = kbnd
+    CALL set_xkphase( ik )
+    pb_n = pb_n + 1
+    DO ir = 1, boxtot
+       z = psir( box_beta(ir) ) * CONJG( xkphase(ir) )
+       pb_w(ir,2*pb_n-1) = DBLE(z) ; pb_w(ir,2*pb_n) = AIMAG(z)
+    ENDDO
+    IF ( pb_n == rs_block ) CALL rs_becp_flush( )
+    !
+  END SUBROUTINE rs_becp_push
+  !
+  !--------------------------------------------------------------------------
+  SUBROUTINE rs_becp_flush( final )
+    !--------------------------------------------------------------------------
+    !! Projects the buffered bands (see rs_becp_push); final=.true. also
+    !! releases the buffer and marks becp as ready for compute_becsum.
+    !
+    USE cell_base,      ONLY : omega
+    USE ions_base,      ONLY : nat, ityp
+    USE uspp_param,     ONLY : nh, nhm
+    USE uspp,           ONLY : ofsbeta
+    USE becmod,         ONLY : becp
+    USE fft_base,       ONLY : dffts
+    USE mp_bands,       ONLY : intra_bgrp_comm
+    USE mp,             ONLY : mp_sum
+    !
+    IMPLICIT NONE
+    !
+    LOGICAL, INTENT(IN), OPTIONAL :: final
+    INTEGER :: i, ia, ih, nhn, mbia
+    REAL(DP) :: facb
+    REAL(DP), ALLOCATABLE :: bec2(:,:)
+    !
+    IF ( ALLOCATED(pb_w) .AND. pb_n > 0 ) THEN
+       CALL start_clock( 'calbec_rs' )
+       ALLOCATE( bec2(nhm,2*pb_n) )
+       facb = SQRT(omega) / (dffts%nr1*dffts%nr2*dffts%nr3)
+       becp%k(:,pb_first:pb_first+pb_n-1) = (0.0_DP,0.0_DP)
+       DO ia = 1, nat
+          mbia = maxbox_beta(ia) ; nhn = nh(ityp(ia))
+          IF ( mbia == 0 .OR. nhn == 0 ) CYCLE
+          CALL DGEMM( 'T', 'N', nhn, 2*pb_n, mbia, facb, betasave(box_s(ia),1), SIZE(betasave,1), &
+                      pb_w(box_s(ia),1), SIZE(pb_w,1), 0.0_DP, bec2, nhm )
+          DO i = 1, pb_n
+             DO ih = 1, nhn
+                becp%k(ofsbeta(ia)+ih,pb_first+i-1) = CMPLX( bec2(ih,2*i-1), bec2(ih,2*i), KIND=DP )
+             ENDDO
+          ENDDO
+       ENDDO
+       CALL mp_sum( becp%k(:,pb_first:pb_first+pb_n-1), intra_bgrp_comm )
+       DEALLOCATE( bec2 )
+       pb_n = 0
+       CALL stop_clock( 'calbec_rs' )
+    ENDIF
+    IF ( PRESENT(final) ) THEN
+       IF ( final ) THEN
+          IF ( ALLOCATED(pb_w) ) DEALLOCATE( pb_w )
+          rs_becp_ready = .TRUE.
+       ENDIF
+    ENDIF
+    !
+  END SUBROUTINE rs_becp_flush
   !
   !--------------------------------------------------------------------------
   SUBROUTINE calbec_rs_k_block( psi, ibnd_start, n )
