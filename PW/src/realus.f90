@@ -3098,7 +3098,7 @@ MODULE realus
        !
     ELSE  ! ... non task_groups version
        !
-       CALL wave_g2r( orbital(:,ibnd:ibnd), psic, dffts, igk=igk_k(:,ik_) )
+       CALL wave_g2r( orbital(1:ngk(ik_),ibnd:ibnd), psic, dffts, igk=igk_k(:,ik_) )
        !
        IF (PRESENT(conserved)) THEN
           IF (conserved) THEN
@@ -3486,7 +3486,7 @@ MODULE realus
   SUBROUTINE rs_g2r( orbital, ibnd )
     !! psic <- orbital(:,ibnd) in real space on the projector grid (current k)
     USE wavefunctions, ONLY : psic
-    USE klist,         ONLY : igk_k
+    USE klist,         ONLY : igk_k, ngk
     USE wvfct,         ONLY : current_k
     USE fft_base,      ONLY : dffts
     USE fft_wave,      ONLY : wave_g2r
@@ -3495,9 +3495,9 @@ MODULE realus
     INTEGER, INTENT(IN) :: ibnd
     CALL start_clock( 'invfft_orbital' )
     IF ( rs_coarse ) THEN
-       CALL wave_g2r( orbital(:,ibnd:ibnd), psic, dfftc, igk=igk_k(:,current_k) )
+       CALL wave_g2r( orbital(1:ngk(current_k),ibnd:ibnd), psic, dfftc, igk=igk_k(:,current_k) )
     ELSE
-       CALL wave_g2r( orbital(:,ibnd:ibnd), psic, dffts, igk=igk_k(:,current_k) )
+       CALL wave_g2r( orbital(1:ngk(current_k),ibnd:ibnd), psic, dffts, igk=igk_k(:,current_k) )
     ENDIF
     CALL stop_clock( 'invfft_orbital' )
   END SUBROUTINE rs_g2r
