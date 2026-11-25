@@ -26,6 +26,16 @@ SUBROUTINE hinit0()
   USE beta_mod,         ONLY : init_tab_beta
   USE realus,           ONLY : generate_qpointlist, betapointlist, &
                                init_realspace_vars, real_space
+  USE realus,           ONLY : rs_cost_model, env_real
+  USE uspp,             ONLY : okvan
+  USE control_flags,    ONLY : gamma_only, use_gpu, isolve
+  USE noncollin_module, ONLY : noncolin
+  USE bp,               ONLY : lelfield
+  USE xc_lib,           ONLY : xclib_dft_is
+  USE fft_base,         ONLY : dffts
+  USE klist,            ONLY : ngk, nks
+  USE mp_bands,         ONLY : nbgrp
+  USE mp,               ONLY : mp_sum
   USE ldaU,             ONLY : lda_plus_U, Hubbard_projectors
   USE control_flags,    ONLY : tqr, tq_smoothing, tbeta_smoothing, restart
   USE io_global,        ONLY : stdout
@@ -45,6 +55,8 @@ SUBROUTINE hinit0()
   IMPLICIT NONE
   REAL (dp) :: alat_old, qmax
   INTEGER   :: ierr
+  INTEGER   :: npw_g
+  REAL (dp) :: t_real, t_recip
   LOGICAL   :: is_tau_read = .FALSE.
   !
 #if defined (__ENVIRON)
@@ -154,6 +166,21 @@ SUBROUTINE hinit0()
   ! ... more position-dependent initializations
   !
   IF ( tqr ) CALL generate_qpointlist()
+  !
+  ! ... automatic choice between real-space and G-space projectors (prototype):
+  ! ... real space is used when supported and estimated to be cheaper
+  !
+  IF ( .NOT. real_space .AND. NINT( env_real( 'QE_RS_AUTO', 1.0_dp ) ) == 1 .AND. &
+       okvan .AND. .NOT. ( gamma_only .OR. noncolin .OR. use_gpu .OR. lmovecell .OR. &
+       lda_plus_U .OR. lelfield .OR. xclib_dft_is('hybrid') .OR. dffts%has_task_groups &
+       .OR. isolve /= 0 .OR. nbgrp > 1 ) ) THEN
+     npw_g = MAXVAL( ngk(1:nks) )
+     CALL mp_sum( npw_g, intra_bgrp_comm )
+     CALL rs_cost_model( npw_g, t_real, t_recip )
+     real_space = ( t_real < 0.9_dp * t_recip )
+     WRITE( stdout, '(5X,"Projectors: estimated cost/band  real space",ES10.3,"  G space",ES10.3, &
+            &"  -> using ",A)' ) t_real, t_recip, TRIM( MERGE( 'real space', 'G space   ', real_space ) )
+  ENDIF
   !
   IF (real_space ) THEN
      CALL betapointlist()

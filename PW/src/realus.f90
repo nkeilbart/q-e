@@ -118,6 +118,7 @@ MODULE realus
             calbec_rs_gamma, add_vuspsir_gamma, invfft_orbital_k,    &
             fwfft_orbital_k, s_psir_k, calbec_rs_k, add_vuspsir_k
   PUBLIC :: rs_block, h_psi_rs_k_block, s_psi_rs_k_block, calbec_rs_k_block
+  PUBLIC :: rs_cost_model, env_real
   !
   CONTAINS
   
@@ -310,7 +311,7 @@ MODULE realus
          !
          boxrad(:) = boxrad(:) / alat
          !
-         lqfilter = ( NINT( env_real( 'QE_RQ_FILTER', 0.0_DP ) ) == 1 )
+         lqfilter = ( NINT( env_real( 'QE_RQ_FILTER', 1.0_DP ) ) == 1 )
          IF ( lqfilter ) THEN
             rfacq  = env_real( 'QE_RQ_RFAC', 0.0_DP )   ! 0: automatic
             gnyq   = tpiba * 0.5_DP * MIN( dfft%nr1*SQRT(SUM(bg(:,1)**2)), &
@@ -916,36 +917,17 @@ MODULE realus
       REAL(DP)              :: inv_nr1s, inv_nr2s, inv_nr3s, tau_ia(3), boxradsq_ia, boxrad_ia
       ! ... filtered (optimised) real-space projectors: prototype, see filter_beta
       LOGICAL               :: lfilter
-      INTEGER               :: nbt, i0
-      CHARACTER(LEN=32)     :: envname
-      INTEGER, ALLOCATABLE  :: lfun(:,:)
-      REAL(DP)              :: rsel
+      INTEGER               :: i0
       INTEGER, PARAMETER    :: nfine = nbfine
-      REAL(DP)              :: rfac, qpass, qstop, wstop, gnyq, drf, xr, tt
+      REAL(DP)              :: drf, xr, tt
       REAL(DP), ALLOCATABLE :: frad(:)
       !
       initialisation_level = initialisation_level + 5
       IF ( .not. okvan ) CALL errore &
                         ('betapointlist','real space routines for USPP only',1)
       !
-      ! ... prototype controls (environment variables):
-      ! ...  QE_RS_FILTER=1  use filtered projectors instead of the raw spline
-      ! ...  QE_RS_RFAC      real-space sphere radius = RFAC * (radius of raw beta)
-      ! ...  QE_RS_QPASS     pass band: chi(q)=beta(q) for q <= QPASS*sqrt(ecutwfc)
-      ! ...  QE_RS_QSTOP     stop band: chi(q)->0 for q >= QSTOP*sqrt(ecutwfc)
-      ! ...                  (default: 2*G_nyquist(smooth grid) - q_pass)
-      ! ...  QE_RS_WSTOP     weight of the stop band in the least-squares fit
-      lfilter = ( NINT( env_real( 'QE_RS_FILTER', 0.0_DP ) ) == 1 )
-      rfac  = env_real( 'QE_RS_RFAC', 0.0_DP )   ! 0: automatic
-      lbfilter = lfilter
-      rs_block = MAX( 1, NINT( env_real( 'QE_RS_BLOCK', 1.0_DP ) ) )
-      WRITE( stdout, '(5X,"RS projectors: band block = ",I4)' ) rs_block
-      qpass = env_real( 'QE_RS_QPASS', 1.0_DP ) * SQRT(ecutwfc)
-      gnyq  = tpiba * 0.5_DP * MIN( dffts%nr1*SQRT(SUM(bg(:,1)**2)), &
-                                    dffts%nr2*SQRT(SUM(bg(:,2)**2)), &
-                                    dffts%nr3*SQRT(SUM(bg(:,3)**2)) )
-      qstop = env_real( 'QE_RS_QSTOP', (2.0_DP*gnyq - qpass)/SQRT(ecutwfc) ) * SQRT(ecutwfc)
-      wstop = env_real( 'QE_RS_WSTOP', 1.0_DP )
+      CALL beta_filter_setup()
+      lfilter = lbfilter
       !
       !print *, "<<<betapointlist>>>"
       !
@@ -954,54 +936,6 @@ MODULE realus
       ! ... betasave is deallocated here to free the memory for the buffers
       !
       IF ( allocated( betasave ) ) DEALLOCATE( betasave )
-      !
-      IF ( .not. allocated( boxrad_beta ) ) THEN
-         !
-         ! ... here we calculate the radius of each spherical box ( one
-         ! ... for each non-local projector )
-         !
-         ALLOCATE( boxrad_beta( nsp ) )
-         boxrad_beta(:) = 0.D0
-         !
-         DO it = 1, nsp
-            DO inbrx = 1, upf(it)%nbeta
-               DO indm = upf(it)%kkbeta, 1, -1
-                  IF ( abs( upf(it)%beta(indm,inbrx) ) > 0.d0 ) THEN
-                     boxrad_beta(it) = max( rgrid(it)%r(indm), boxrad_beta(it) )
-                     CYCLE
-                  ENDIF
-               ENDDO
-            ENDDO
-         ENDDO
-         !
-         boxrad_beta(:) = boxrad_beta(:) / alat
-         IF ( lfilter ) THEN
-            ! ... sphere radius: chosen automatically so that the filter error is
-            ! ... below QE_RS_TOL, unless QE_RS_RFAC or QE_RS_RFAC_<it> fixes it
-            nbt = MAXVAL( upf(1:nsp)%nbeta )
-            IF ( ALLOCATED(bftab) ) DEALLOCATE( bftab )
-            ALLOCATE( bftab(nbfine,nbt,nsp) )
-            bftab = 0.0_DP
-            WRITE( stdout, '(5X,"RS filter: beta  qpass=",F8.4," qstop=",F8.4," (bohr^-1)  wstop=",ES9.2, &
-                   &"  G_nyq(smooth)=",F8.4)' ) qpass, qstop, wstop, gnyq
-            DO it = 1, nsp
-               IF ( .not. upf(it)%tvanp .OR. upf(it)%nbeta == 0 ) CYCLE
-               WRITE( envname, '("QE_RS_RFAC_",I0)' ) it
-               ALLOCATE( lfun(3,upf(it)%nbeta) )
-               DO nb = 1, upf(it)%nbeta
-                  lfun(:,nb) = (/ upf(it)%lll(nb), nb, 0 /)
-               ENDDO
-               CALL filter_species( 'beta', it, upf(it)%nbeta, lfun, boxrad_beta(it)*alat, &
-                    boxrad_beta(it)*alat*env_real( TRIM(envname), rfac ), &
-                    env_real( 'QE_RS_TOL', 3.0D-6 ), qpass, qstop, wstop, nbfine, rsel, bftab(1,1,it) )
-               boxrad_beta(it) = rsel / alat
-               DEALLOCATE( lfun )
-            ENDDO
-         ENDIF
-         WRITE( stdout, '(5X,"RS projectors: filter=",L1,"  rfac=",F6.3,"  sphere radii (bohr):",10F8.4)' ) &
-                lfilter, rfac, boxrad_beta(:)*alat
-         !
-      ENDIF
       !
       ! ... a rough estimate for the number of grid-points per box
       ! ... is provided here
@@ -1278,6 +1212,128 @@ MODULE realus
       CALL stop_clock( 'betapointlist' )
       !
     END SUBROUTINE betapointlist
+    !
+    !------------------------------------------------------------------------
+    SUBROUTINE beta_filter_setup()
+      !------------------------------------------------------------------------
+      !! Radii of the real-space spheres of the beta projectors and, if the
+      !! filter is on (default), the radial tables of the filtered projectors.
+      !! Done once. Controls (environment variables, prototype):
+      !!  QE_RS_FILTER=0  raw spline of beta(r) instead of filtered projectors
+      !!  QE_RS_TOL       filter tolerance used to choose the sphere radius
+      !!  QE_RS_RFAC[_n]  fix the radius to RFAC * (radius of raw beta) [species n]
+      !!  QE_RS_QPASS     pass band: chi(q)=beta(q) for q <= QPASS*sqrt(ecutwfc)
+      !!  QE_RS_QSTOP     stop band: chi(q)->0 for q >= QSTOP*sqrt(ecutwfc)
+      !!                  (default: 2*G_nyquist(smooth grid) - q_pass)
+      !!  QE_RS_WSTOP     weight of the stop band in the least-squares fit
+      !!  QE_RS_BLOCK     bands per block in the k-point kernels (default 16)
+      !
+      USE ions_base,  ONLY : nsp
+      USE cell_base,  ONLY : alat, bg, tpiba
+      USE uspp_param, ONLY : upf
+      USE atom,       ONLY : rgrid
+      USE fft_base,   ONLY : dffts
+      USE gvecw,      ONLY : ecutwfc
+      !
+      IMPLICIT NONE
+      !
+      INTEGER  :: it, inbrx, indm, nb, nbt
+      REAL(DP) :: rfac, qpass, qstop, wstop, gnyq, rsel
+      CHARACTER(LEN=32) :: envname
+      INTEGER, ALLOCATABLE :: lfun(:,:)
+      !
+      IF ( allocated( boxrad_beta ) ) RETURN
+      !
+      lbfilter = ( NINT( env_real( 'QE_RS_FILTER', 1.0_DP ) ) == 1 )
+      rfac     = env_real( 'QE_RS_RFAC', 0.0_DP )   ! 0: automatic
+      rs_block = MAX( 1, NINT( env_real( 'QE_RS_BLOCK', 16.0_DP ) ) )
+      qpass = env_real( 'QE_RS_QPASS', 1.0_DP ) * SQRT(ecutwfc)
+      gnyq  = tpiba * 0.5_DP * MIN( dffts%nr1*SQRT(SUM(bg(:,1)**2)), &
+                                    dffts%nr2*SQRT(SUM(bg(:,2)**2)), &
+                                    dffts%nr3*SQRT(SUM(bg(:,3)**2)) )
+      qstop = env_real( 'QE_RS_QSTOP', (2.0_DP*gnyq - qpass)/SQRT(ecutwfc) ) * SQRT(ecutwfc)
+      wstop = env_real( 'QE_RS_WSTOP', 1.0_DP )
+      !
+      ! ... radius of the raw beta functions
+      !
+      ALLOCATE( boxrad_beta( nsp ) )
+      boxrad_beta(:) = 0.D0
+      DO it = 1, nsp
+         DO inbrx = 1, upf(it)%nbeta
+            DO indm = upf(it)%kkbeta, 1, -1
+               IF ( abs( upf(it)%beta(indm,inbrx) ) > 0.d0 ) THEN
+                  boxrad_beta(it) = max( rgrid(it)%r(indm), boxrad_beta(it) )
+                  CYCLE
+               ENDIF
+            ENDDO
+         ENDDO
+      ENDDO
+      boxrad_beta(:) = boxrad_beta(:) / alat
+      !
+      IF ( lbfilter ) THEN
+         ! ... sphere radius: chosen automatically so that the filter error is
+         ! ... below QE_RS_TOL, unless QE_RS_RFAC or QE_RS_RFAC_<it> fixes it
+         nbt = MAXVAL( upf(1:nsp)%nbeta )
+         IF ( ALLOCATED(bftab) ) DEALLOCATE( bftab )
+         ALLOCATE( bftab(nbfine,nbt,nsp) )
+         bftab = 0.0_DP
+         WRITE( stdout, '(5X,"RS filter: beta  qpass=",F8.4," qstop=",F8.4," (bohr^-1)  wstop=",ES9.2, &
+                &"  G_nyq(smooth)=",F8.4)' ) qpass, qstop, wstop, gnyq
+         DO it = 1, nsp
+            IF ( .not. upf(it)%tvanp .OR. upf(it)%nbeta == 0 ) CYCLE
+            WRITE( envname, '("QE_RS_RFAC_",I0)' ) it
+            ALLOCATE( lfun(3,upf(it)%nbeta) )
+            DO nb = 1, upf(it)%nbeta
+               lfun(:,nb) = (/ upf(it)%lll(nb), nb, 0 /)
+            ENDDO
+            CALL filter_species( 'beta', it, upf(it)%nbeta, lfun, boxrad_beta(it)*alat, &
+                 boxrad_beta(it)*alat*env_real( TRIM(envname), rfac ), &
+                 env_real( 'QE_RS_TOL', 3.0D-6 ), qpass, qstop, wstop, nbfine, rsel, bftab(1,1,it) )
+            boxrad_beta(it) = rsel / alat
+            DEALLOCATE( lfun )
+         ENDDO
+      ENDIF
+      WRITE( stdout, '(5X,"RS projectors: filter=",L1,"  band block=",I3,"  sphere radii (bohr):",10F8.4)' ) &
+             lbfilter, rs_block, boxrad_beta(:)*alat
+      !
+    END SUBROUTINE beta_filter_setup
+    !
+    !------------------------------------------------------------------------
+    SUBROUTINE rs_cost_model( npw_g, t_real, t_recip )
+      !------------------------------------------------------------------------
+      !! Rough cost per band (seconds x number of MPI ranks) of applying the
+      !! nonlocal projectors (calbec + V_NL + S) in real space and in G space.
+      !! Real space: work on (sphere points x projectors) plus one extra
+      !! smooth-grid FFT per band; G space: three sweeps over npw x nkb.
+      !! Constants measured with MKL on the development machine (prototype).
+      !
+      USE constants,  ONLY : fpi
+      USE ions_base,  ONLY : nat, ityp
+      USE cell_base,  ONLY : alat, omega
+      USE uspp_param, ONLY : upf, nh
+      USE uspp,       ONLY : nkb
+      USE fft_base,   ONLY : dffts
+      !
+      IMPLICIT NONE
+      !
+      INTEGER, INTENT(IN)   :: npw_g
+      REAL(DP), INTENT(OUT) :: t_real, t_recip
+      REAL(DP), PARAMETER :: c_real = 2.0D-9, c_fft = 1.5D-8, c_recip = 7.5D-10
+      REAL(DP) :: nrs, work
+      INTEGER  :: ia, nt
+      !
+      CALL beta_filter_setup()
+      nrs  = DBLE(dffts%nr1) * DBLE(dffts%nr2) * DBLE(dffts%nr3)
+      work = 0.0_DP
+      DO ia = 1, nat
+         nt = ityp(ia)
+         IF ( .not. upf(nt)%tvanp ) CYCLE
+         work = work + fpi/3.0_DP * (boxrad_beta(nt)*alat)**3 * nrs/omega * nh(nt)
+      ENDDO
+      t_real  = c_real * work + c_fft * nrs
+      t_recip = c_recip * DBLE(npw_g) * DBLE(nkb)
+      !
+    END SUBROUTINE rs_cost_model
     !
     !------------------------------------------------------------------------
     FUNCTION env_real( name, default )

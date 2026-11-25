@@ -51,6 +51,10 @@ SUBROUTINE init_run()
   USE sci_mod,            ONLY : allocate_scissor
   USE uspp_param,         ONLY : nhm
   USE uspp,               ONLY : allocate_uspp
+  USE uspp,               ONLY : okvan
+  USE xc_lib,             ONLY : xclib_dft_is
+  USE realus,             ONLY : env_real
+  USE io_global,          ONLY : stdout
   !
 #if defined (__ENVIRON)
   USE plugin_flags,        ONLY : use_environ
@@ -70,6 +74,14 @@ SUBROUTINE init_run()
   ! ... calculate limits of some indices, used in subsequent allocations
   !
   CALL pre_init()
+  !
+  ! ... real-space (filtered) augmentation is used whenever supported (prototype)
+  !
+  IF ( .NOT. tqr .AND. NINT( env_real( 'QE_RS_AUTO', 1.0_dp ) ) == 1 .AND. okvan .AND. &
+       .NOT. ( noncolin .OR. use_gpu .OR. lmovecell .OR. xclib_dft_is('hybrid') ) ) THEN
+     tqr = .TRUE.
+     WRITE( stdout, '(/,5X,"Augmentation charges: using filtered real-space Q(r)")' )
+  ENDIF
   !
   ! ... determine the data structure for fft arrays
   !
