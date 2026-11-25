@@ -24,6 +24,7 @@ MODULE realus
   !
   USE kinds,     ONLY : DP
   USE io_global, ONLY : stdout
+  USE fft_types, ONLY : fft_type_descriptor
   !
   IMPLICIT NONE
   !
@@ -53,6 +54,14 @@ MODULE realus
   !
   LOGICAL :: real_space = .FALSE.
   INTEGER :: rs_block = 1
+  LOGICAL :: rs_coarse = .FALSE.
+  !! (prototype, env QE_RS_GRIDFAC < 2) the real-space projector path applies
+  !! V_loc and the projectors on a coarser FFT grid (dfftc) whose G sphere has
+  !! radius QE_RS_GRIDFAC * sqrt(gkcut) instead of 2 * sqrt(gkcut)
+  TYPE(fft_type_descriptor) :: dfftc
+  LOGICAL :: rs_coarse_allowed = .TRUE.
+  REAL(DP), ALLOCATABLE :: vrs_c(:,:)
+  !! local potential on the coarse grid
   LOGICAL :: rs_free_vkb = .FALSE.
   !! .true. when real-space projectors were chosen automatically for a plain
   !! SCF run: the G-space projectors vkb(npwx,nkb) are then not kept in
@@ -128,6 +137,7 @@ MODULE realus
   PUBLIC :: rs_block, h_psi_rs_k_block, s_psi_rs_k_block, calbec_rs_k_block
   PUBLIC :: rs_cost_model, env_real
   PUBLIC :: rs_becp_push, rs_becp_flush, rs_becp_ready, rs_free_vkb
+  PUBLIC :: rs_coarse, rs_update_vc, rs_coarse_check
   !
   CONTAINS
   
@@ -873,6 +883,21 @@ MODULE realus
     !------------------------------------------------------------------------
     SUBROUTINE betapointlist()
       !------------------------------------------------------------------------
+      !! Real-space boxes and projectors on the grid used by the real-space
+      !! projector path (smooth grid, or the coarse grid if rs_coarse).
+      USE fft_base,   ONLY : dffts
+      IMPLICIT NONE
+      CALL beta_filter_setup()
+      IF ( rs_coarse ) THEN
+         CALL betapointlist_g( dfftc )
+      ELSE
+         CALL betapointlist_g( dffts )
+      ENDIF
+    END SUBROUTINE betapointlist
+    !
+    !------------------------------------------------------------------------
+    SUBROUTINE betapointlist_g( dfb )
+      !------------------------------------------------------------------------
       !! This subroutine is the driver routine of the box system in this
       !! implementation of US in real space.
       !
@@ -899,13 +924,13 @@ MODULE realus
       USE uspp,       ONLY : okvan, indv,nhtolm
       USE uspp_param, ONLY : upf, lmaxq, nh, nhm
       USE atom,       ONLY : rgrid
-      USE fft_base,   ONLY : dffts
       USE splinelib,  ONLY : spline, splint
       USE gvecw,      ONLY : ecutwfc
       USE cell_base,  ONLY : tpiba
       !
       IMPLICIT NONE
       !
+      TYPE(fft_type_descriptor), INTENT(IN) :: dfb
       LOGICAL, PARAMETER    :: tprint = .false.  ! whether to print info on betapointlist
       !
       INTEGER               :: ia, it, mbia
@@ -935,7 +960,6 @@ MODULE realus
       IF ( .not. okvan ) CALL errore &
                         ('betapointlist','real space routines for USPP only',1)
       !
-      CALL beta_filter_setup()
       lfilter = lbfilter
       !
       !print *, "<<<betapointlist>>>"
@@ -955,9 +979,9 @@ MODULE realus
       mby = mbr*sqrt( bg(2,1)**2 + bg(2,2)**2 + bg(2,3)**2 )
       mbz = mbr*sqrt( bg(3,1)**2 + bg(3,2)**2 + bg(3,3)**2 )
       !
-      dmbx = 2*anint( mbx*dffts%nr1x ) + 2
-      dmby = 2*anint( mby*dffts%nr2x ) + 2
-      dmbz = 2*anint( mbz*dffts%nr3x ) + 2
+      dmbx = 2*anint( mbx*dfb%nr1x ) + 2
+      dmby = 2*anint( mby*dfb%nr2x ) + 2
+      dmbz = 2*anint( mbz*dfb%nr3x ) + 2
       !
       roughestimate = anint( dble( dmbx*dmby*dmbz ) * pi / 6.D0 )
       !
@@ -979,9 +1003,9 @@ MODULE realus
       !
       ! The beta functions are treated on smooth grid
       !
-      inv_nr1s = 1.D0 / dble( dffts%nr1 )
-      inv_nr2s = 1.D0 / dble( dffts%nr2 )
-      inv_nr3s = 1.D0 / dble( dffts%nr3 )
+      inv_nr1s = 1.D0 / dble( dfb%nr1 )
+      inv_nr2s = 1.D0 / dble( dfb%nr2 )
+      inv_nr3s = 1.D0 / dble( dfb%nr3 )
       !
       DO ia = 1, nat
          !
@@ -997,32 +1021,32 @@ MODULE realus
          ! ... compute the needed ranges for i,j,k  indices around the atom position in crystal coordinates
          !
          posi(:) = tau_ia(:) ; CALL cryst_to_cart( 1, posi, bg, -1 )
-         imin = NINT((posi(1) - boxrad_ia * sqrt(bg(1,1)*bg(1,1)+bg(2,1)*bg(2,1)+bg(3,1)*bg(3,1)))*dffts%nr1)
-         imax = NINT((posi(1) + boxrad_ia * sqrt(bg(1,1)*bg(1,1)+bg(2,1)*bg(2,1)+bg(3,1)*bg(3,1)))*dffts%nr1)
-         jmin = NINT((posi(2) - boxrad_ia * sqrt(bg(1,2)*bg(1,2)+bg(2,2)*bg(2,2)+bg(3,2)*bg(3,2)))*dffts%nr2)
-         jmax = NINT((posi(2) + boxrad_ia * sqrt(bg(1,2)*bg(1,2)+bg(2,2)*bg(2,2)+bg(3,2)*bg(3,2)))*dffts%nr2)
-         kmin = NINT((posi(3) - boxrad_ia * sqrt(bg(1,3)*bg(1,3)+bg(2,3)*bg(2,3)+bg(3,3)*bg(3,3)))*dffts%nr3)
-         kmax = NINT((posi(3) + boxrad_ia * sqrt(bg(1,3)*bg(1,3)+bg(2,3)*bg(2,3)+bg(3,3)*bg(3,3)))*dffts%nr3)
+         imin = NINT((posi(1) - boxrad_ia * sqrt(bg(1,1)*bg(1,1)+bg(2,1)*bg(2,1)+bg(3,1)*bg(3,1)))*dfb%nr1)
+         imax = NINT((posi(1) + boxrad_ia * sqrt(bg(1,1)*bg(1,1)+bg(2,1)*bg(2,1)+bg(3,1)*bg(3,1)))*dfb%nr1)
+         jmin = NINT((posi(2) - boxrad_ia * sqrt(bg(1,2)*bg(1,2)+bg(2,2)*bg(2,2)+bg(3,2)*bg(3,2)))*dfb%nr2)
+         jmax = NINT((posi(2) + boxrad_ia * sqrt(bg(1,2)*bg(1,2)+bg(2,2)*bg(2,2)+bg(3,2)*bg(3,2)))*dfb%nr2)
+         kmin = NINT((posi(3) - boxrad_ia * sqrt(bg(1,3)*bg(1,3)+bg(2,3)*bg(2,3)+bg(3,3)*bg(3,3)))*dfb%nr3)
+         kmax = NINT((posi(3) + boxrad_ia * sqrt(bg(1,3)*bg(1,3)+bg(2,3)*bg(2,3)+bg(3,3)*bg(3,3)))*dfb%nr3)
          if (tprint) then
             write (*,*) tau_ia
             write (*,*) posi
             write (*,*) imin,imax,jmin,jmax,kmin,kmax
          end if
          DO k = kmin, kmax
-            kk = modulo(k,dffts%nr3) - dffts%my_i0r3p
-            if (kk .LT. 0 .OR. kk .ge. dffts%my_nr3p ) cycle
+            kk = modulo(k,dfb%nr3) - dfb%my_i0r3p
+            if (kk .LT. 0 .OR. kk .ge. dfb%my_nr3p ) cycle
             DO j = jmin, jmax
-               jj = modulo(j,dffts%nr2) - dffts%my_i0r2p
-               if (jj .LT. 0 .OR. jj .ge. dffts%my_nr2p ) cycle
+               jj = modulo(j,dfb%nr2) - dfb%my_i0r2p
+               if (jj .LT. 0 .OR. jj .ge. dfb%my_nr2p ) cycle
                DO i = imin, imax
-                  ii = modulo(i,dffts%nr1) 
+                  ii = modulo(i,dfb%nr1) 
                   !
                   posi(:) = i * inv_nr1s*at(:,1) + j * inv_nr2s*at(:,2) + k * inv_nr3s*at(:,3) - tau_ia(:)
                   !
                   distsq = posi(1)**2 + posi(2)**2 + posi(3)**2
                   IF ( distsq < boxradsq_ia ) THEN
                      ! compute fft index ir from ii,jj,kk
-                     ir = 1 + ii + jj * dffts%nr1x + kk * dffts%nr1x * dffts%my_nr2p
+                     ir = 1 + ii + jj * dfb%nr1x + kk * dfb%nr1x * dfb%my_nr2p
                      !
                      mbia = maxbox_beta(ia) + 1
                      !
@@ -1070,6 +1094,7 @@ MODULE realus
          boxdist_beta( box_s(ia):box_e(ia) ) =  tmp_boxdist_beta(       1:maxbox_beta(ia),ia)
       end do
       !
+      current_phase_kpoint = -1
       call set_xkphase(1)
       !
       DEALLOCATE( tmp_xyz_beta )
@@ -1220,7 +1245,7 @@ MODULE realus
       CALL stop_clock( 'realus:tabp' )
       CALL stop_clock( 'betapointlist' )
       !
-    END SUBROUTINE betapointlist
+    END SUBROUTINE betapointlist_g
     !
     !------------------------------------------------------------------------
     SUBROUTINE beta_filter_setup()
@@ -1246,20 +1271,22 @@ MODULE realus
       !
       IMPLICIT NONE
       !
-      INTEGER  :: it, inbrx, indm, nb, nbt
+      INTEGER  :: it, inbrx, indm, nb, nbt, n1, n2, n3
       REAL(DP) :: rfac, qpass, qstop, wstop, gnyq, rsel
       CHARACTER(LEN=32) :: envname
       INTEGER, ALLOCATABLE :: lfun(:,:)
       !
       IF ( allocated( boxrad_beta ) ) RETURN
       !
+      CALL rs_coarse_setup()
+      CALL rs_dims( n1, n2, n3 )
       lbfilter = ( NINT( env_real( 'QE_RS_FILTER', 1.0_DP ) ) == 1 )
       rfac     = env_real( 'QE_RS_RFAC', 0.0_DP )   ! 0: automatic
       rs_block = MAX( 1, NINT( env_real( 'QE_RS_BLOCK', 16.0_DP ) ) )
       qpass = env_real( 'QE_RS_QPASS', 1.0_DP ) * SQRT(ecutwfc)
-      gnyq  = tpiba * 0.5_DP * MIN( dffts%nr1*SQRT(SUM(bg(:,1)**2)), &
-                                    dffts%nr2*SQRT(SUM(bg(:,2)**2)), &
-                                    dffts%nr3*SQRT(SUM(bg(:,3)**2)) )
+      gnyq  = tpiba * 0.5_DP * MIN( n1*SQRT(SUM(bg(:,1)**2)), &
+                                    n2*SQRT(SUM(bg(:,2)**2)), &
+                                    n3*SQRT(SUM(bg(:,3)**2)) )
       qstop = env_real( 'QE_RS_QSTOP', (2.0_DP*gnyq - qpass)/SQRT(ecutwfc) ) * SQRT(ecutwfc)
       wstop = env_real( 'QE_RS_WSTOP', 1.0_DP )
       !
@@ -1287,7 +1314,7 @@ MODULE realus
          ALLOCATE( bftab(nbfine,nbt,nsp) )
          bftab = 0.0_DP
          WRITE( stdout, '(5X,"RS filter: beta  qpass=",F8.4," qstop=",F8.4," (bohr^-1)  wstop=",ES9.2, &
-                &"  G_nyq(smooth)=",F8.4)' ) qpass, qstop, wstop, gnyq
+                &"  G_nyq(grid)=",F8.4)' ) qpass, qstop, wstop, gnyq
          DO it = 1, nsp
             IF ( .not. upf(it)%tvanp .OR. upf(it)%nbeta == 0 ) CYCLE
             WRITE( envname, '("QE_RS_RFAC_",I0)' ) it
@@ -1328,19 +1355,27 @@ MODULE realus
       INTEGER, INTENT(IN)   :: npw_g
       REAL(DP), INTENT(OUT) :: t_real, t_recip
       REAL(DP), PARAMETER :: c_real = 2.0D-9, c_fft = 1.5D-8, c_recip = 7.5D-10
-      REAL(DP) :: nrs, work
+      REAL(DP) :: nrs, nrb, work
       INTEGER  :: ia, nt
       !
+      ! ... the estimate is made for the smooth grid, on which the run ends;
+      ! ... the coarse grid of the first scf iterations is set up afterwards
+      rs_coarse_allowed = .FALSE.
       CALL beta_filter_setup()
       nrs  = DBLE(dffts%nr1) * DBLE(dffts%nr2) * DBLE(dffts%nr3)
+      nrb  = rs_ngrid()
       work = 0.0_DP
       DO ia = 1, nat
          nt = ityp(ia)
          IF ( .not. upf(nt)%tvanp ) CYCLE
-         work = work + fpi/3.0_DP * (boxrad_beta(nt)*alat)**3 * nrs/omega * nh(nt)
+         work = work + fpi/3.0_DP * (boxrad_beta(nt)*alat)**3 * nrb/omega * nh(nt)
       ENDDO
-      t_real  = c_real * work + c_fft * nrs
-      t_recip = c_recip * DBLE(npw_g) * DBLE(nkb)
+      ! FFTs per band: 3 on the projector grid (real space), 2 on the smooth grid (G space)
+      t_real  = c_real * work + 3.0_DP * c_fft * nrb
+      t_recip = c_recip * DBLE(npw_g) * DBLE(nkb) + 2.0_DP * c_fft * nrs
+      !
+      DEALLOCATE( boxrad_beta )
+      rs_coarse_allowed = .TRUE.
       !
     END SUBROUTINE rs_cost_model
     !
@@ -3170,6 +3205,160 @@ MODULE realus
   END SUBROUTINE v_loc_psir_inplace
 
   !--------------------------------------------------------------------------
+  SUBROUTINE rs_coarse_setup()
+    !--------------------------------------------------------------------------
+    !! Creates the coarse FFT grid dfftc for the real-space projector path if
+    !! QE_RS_GRIDFAC < 2 (prototype). The grid holds the G sphere of radius
+    !! GRIDFAC*sqrt(gkcut); the smooth grid corresponds to GRIDFAC = 2.
+    !
+    USE fft_base,       ONLY : smap, dffts
+    USE fft_types,      ONLY : fft_type_init
+    USE recvec_subs,    ONLY : ggens
+    USE gvect,          ONLY : g, gg, mill
+    USE gvecw,          ONLY : gkcut
+    USE cell_base,      ONLY : at, bg
+    USE control_flags,  ONLY : gamma_only
+    USE mp_bands,       ONLY : nproc_bgrp, intra_bgrp_comm, nyfft
+    USE symm_base,      ONLY : fft_fact
+    USE command_line_options, ONLY : pencil_decomposition_, nmany_
+    !
+    IMPLICIT NONE
+    REAL(DP) :: fac
+    INTEGER  :: ngmc
+    LOGICAL, SAVE :: done = .FALSE.
+    !
+    IF ( done .OR. .NOT. rs_coarse_allowed ) RETURN
+    done = .TRUE.
+    fac = env_real( 'QE_RS_GRIDFAC', 1.5_DP )
+    IF ( fac >= 2.0_DP - 1.0D-6 .OR. gamma_only ) RETURN
+    IF ( fac < 1.0_DP ) CALL errore( 'rs_coarse_setup', 'QE_RS_GRIDFAC must be >= 1', 1 )
+    CALL fft_type_init( dfftc, smap, "wave", gamma_only, ( nproc_bgrp > 1 ), intra_bgrp_comm, &
+         at, bg, gkcut, fac**2, fft_fact=fft_fact, nyfft=nyfft, nmany=nmany_, &
+         use_pd=pencil_decomposition_ )
+    dfftc%rho_clock_label = 'fftc' ; dfftc%wave_clock_label = 'fftcw'
+    CALL ggens( dfftc, gamma_only, at, g, gg, mill, fac**2*gkcut, ngmc )
+    rs_coarse = .TRUE.
+    WRITE( stdout, '(5X,"RS projectors: coarse grid factor",F6.3,"  FFT dimensions (",I4,",",I4,",",I4, &
+         &")  smooth grid (",I4,",",I4,",",I4,")")' ) fac, dfftc%nr1, dfftc%nr2, dfftc%nr3, &
+         dffts%nr1, dffts%nr2, dffts%nr3
+    !
+  END SUBROUTINE rs_coarse_setup
+  !
+  !--------------------------------------------------------------------------
+  SUBROUTINE rs_coarse_check( dr2, nelec )
+    !--------------------------------------------------------------------------
+    !! The coarse grid is used only while the SCF error is large: when the
+    !! estimated SCF accuracy dr2 falls below QE_RS_COARSE_TR2 (default 1e-6 Ry)
+    !! per electron, the real-space projector path goes back to the smooth
+    !! grid, so that the converged result is that of the exact product grid.
+    !! QE_RS_COARSE_TR2=0 keeps the coarse grid to the end.
+    !
+    IMPLICIT NONE
+    REAL(DP), INTENT(IN) :: dr2, nelec
+    !
+    IF ( .NOT. rs_coarse ) RETURN
+    IF ( dr2 >= env_real( 'QE_RS_COARSE_TR2', 1.0D-6 ) * MAX( 1.0_DP, nelec ) ) RETURN
+    rs_coarse = .FALSE.
+    IF ( ALLOCATED( boxrad_beta ) ) DEALLOCATE( boxrad_beta )
+    IF ( ALLOCATED( vrs_c ) ) DEALLOCATE( vrs_c )
+    WRITE( stdout, '(/,5X,"RS projectors: estimated scf accuracy",ES10.2," Ry -> switching from the coarse", &
+         &" to the smooth FFT grid")' ) dr2
+    CALL betapointlist()
+    !
+  END SUBROUTINE rs_coarse_check
+  !
+  !--------------------------------------------------------------------------
+  SUBROUTINE rs_update_vc( vrs, nrxx, nspin )
+    !--------------------------------------------------------------------------
+    !! Local potential on the coarse grid (Fourier components of vrs inside
+    !! the G sphere of dfftc). Called by set_vrs; no-op without coarse grid.
+    USE fft_base,        ONLY : dffts
+    USE fft_interfaces,  ONLY : fft_interpolate
+    IMPLICIT NONE
+    INTEGER, INTENT(IN)  :: nrxx, nspin
+    REAL(DP), INTENT(IN) :: vrs(nrxx,nspin)
+    INTEGER :: is
+    IF ( .NOT. rs_coarse ) RETURN
+    IF ( .NOT. ALLOCATED(vrs_c) ) ALLOCATE( vrs_c(dfftc%nnr,nspin) )
+    DO is = 1, nspin
+       CALL fft_interpolate( dffts, vrs(:,is), dfftc, vrs_c(:,is) )
+    ENDDO
+  END SUBROUTINE rs_update_vc
+  !
+  !--------------------------------------------------------------------------
+  SUBROUTINE rs_dims( n1, n2, n3 )
+    !! FFT dimensions of the grid used by the real-space projector path
+    USE fft_base, ONLY : dffts
+    INTEGER, INTENT(OUT) :: n1, n2, n3
+    IF ( rs_coarse ) THEN
+       n1 = dfftc%nr1 ; n2 = dfftc%nr2 ; n3 = dfftc%nr3
+    ELSE
+       n1 = dffts%nr1 ; n2 = dffts%nr2 ; n3 = dffts%nr3
+    ENDIF
+  END SUBROUTINE rs_dims
+  !
+  FUNCTION rs_ngrid()
+    REAL(DP) :: rs_ngrid
+    INTEGER :: n1, n2, n3
+    CALL rs_dims( n1, n2, n3 )
+    rs_ngrid = DBLE(n1) * DBLE(n2) * DBLE(n3)
+  END FUNCTION rs_ngrid
+  !
+  FUNCTION rs_nnr()
+    USE fft_base, ONLY : dffts
+    INTEGER :: rs_nnr
+    rs_nnr = dffts%nnr
+    IF ( rs_coarse ) rs_nnr = dfftc%nnr
+  END FUNCTION rs_nnr
+  !
+  !--------------------------------------------------------------------------
+  SUBROUTINE rs_g2r( orbital, ibnd )
+    !! psic <- orbital(:,ibnd) in real space on the projector grid (current k)
+    USE wavefunctions, ONLY : psic
+    USE klist,         ONLY : igk_k
+    USE wvfct,         ONLY : current_k
+    USE fft_base,      ONLY : dffts
+    USE fft_wave,      ONLY : wave_g2r
+    IMPLICIT NONE
+    COMPLEX(DP), INTENT(IN) :: orbital(:,:)
+    INTEGER, INTENT(IN) :: ibnd
+    CALL start_clock( 'invfft_orbital' )
+    IF ( rs_coarse ) THEN
+       CALL wave_g2r( orbital(:,ibnd:ibnd), psic, dfftc, igk=igk_k(:,current_k) )
+    ELSE
+       CALL wave_g2r( orbital(:,ibnd:ibnd), psic, dffts, igk=igk_k(:,current_k) )
+    ENDIF
+    CALL stop_clock( 'invfft_orbital' )
+  END SUBROUTINE rs_g2r
+  !
+  !--------------------------------------------------------------------------
+  SUBROUTINE rs_r2g_add( orbital, ibnd )
+    !! orbital(:,ibnd) <- orbital(:,ibnd) + psic transformed to G space
+    USE wavefunctions, ONLY : psic
+    USE klist,         ONLY : igk_k, ngk
+    USE wvfct,         ONLY : current_k
+    USE fft_base,      ONLY : dffts
+    USE fft_wave,      ONLY : wave_r2g
+    IMPLICIT NONE
+    COMPLEX(DP), INTENT(INOUT) :: orbital(:,:)
+    INTEGER, INTENT(IN) :: ibnd
+    COMPLEX(DP), ALLOCATABLE :: psio(:,:)
+    INTEGER :: ig
+    CALL start_clock( 'fwfft_orbital' )
+    ALLOCATE( psio(ngk(current_k),1) )
+    IF ( rs_coarse ) THEN
+       CALL wave_r2g( psic(1:dfftc%nnr), psio, dfftc, igk=igk_k(:,current_k) )
+    ELSE
+       CALL wave_r2g( psic(1:dffts%nnr), psio, dffts, igk=igk_k(:,current_k) )
+    ENDIF
+    DO ig = 1, ngk(current_k)
+       orbital(ig,ibnd) = orbital(ig,ibnd) + psio(ig,1)
+    ENDDO
+    DEALLOCATE( psio )
+    CALL stop_clock( 'fwfft_orbital' )
+  END SUBROUTINE rs_r2g_add
+  !
+  !--------------------------------------------------------------------------
   SUBROUTINE h_psi_rs_k_block( m, psi, hpsi )
     !--------------------------------------------------------------------------
     !! Blocked version of the k-point real-space loop of h_psi_ (CPU):
@@ -3206,22 +3395,26 @@ MODULE realus
     !
     IF ( dffts%has_task_groups ) CALL errore( 'h_psi_rs_k_block', 'task_groups not implemented', 1 )
     nb  = MIN( rs_block, m )
-    nnr = dffts%nnr
+    nnr = rs_nnr()
     ALLOCATE( psib(nnr,nb), wblk(MAX(boxtot,1),2*nb), outb(MAX(boxtot,1),2*nb), bec2(nhm,2*nb), w2(nhm,2*nb) )
     CALL set_xkphase( current_k )
-    facb = SQRT(omega) / (dffts%nr1*dffts%nr2*dffts%nr3)
+    facb = SQRT(omega) / rs_ngrid()
     faca = SQRT(omega)
     !
     DO b0 = 1, m, nb
        ib = MIN( nb, m-b0+1 )
        DO i = 1, ib
-          CALL invfft_orbital_k( psi, b0+i-1, m )
+          CALL rs_g2r( psi, b0+i-1 )
           DO ir = 1, boxtot
              z = psic( box_beta(ir) ) * CONJG( xkphase(ir) )
              wblk(ir,2*i-1) = DBLE(z) ; wblk(ir,2*i) = AIMAG(z)
           ENDDO
           CALL start_clock( 'v_loc_psir' )
-          psib(1:nnr,i) = vrs(1:nnr,current_spin) * psic(1:nnr)
+          IF ( rs_coarse ) THEN
+             psib(1:nnr,i) = vrs_c(1:nnr,current_spin) * psic(1:nnr)
+          ELSE
+             psib(1:nnr,i) = vrs(1:nnr,current_spin) * psic(1:nnr)
+          ENDIF
           CALL stop_clock( 'v_loc_psir' )
        ENDDO
        !
@@ -3264,7 +3457,7 @@ MODULE realus
              psic( box_beta(ir) ) = psic( box_beta(ir) ) + &
                   xkphase(ir) * CMPLX( outb(ir,2*i-1), outb(ir,2*i), KIND=DP )
           ENDDO
-          CALL fwfft_orbital_k( hpsi, b0+i-1, m, add_to_orbital=.TRUE. )
+          CALL rs_r2g_add( hpsi, b0+i-1 )
        ENDDO
     ENDDO
     !
@@ -3386,12 +3579,12 @@ MODULE realus
     nb = MIN( rs_block, n )
     ALLOCATE( wblk(MAX(boxtot,1),2*nb), bec2(nhm,2*nb) )
     CALL set_xkphase( current_k )
-    facb = SQRT(omega) / (dffts%nr1*dffts%nr2*dffts%nr3)
+    facb = SQRT(omega) / rs_ngrid()
     !
     DO b0 = 1, n, nb
        ib = MIN( nb, n-b0+1 )
        DO i = 1, ib
-          CALL invfft_orbital_k( psi, ibnd_start+b0+i-2, ibnd_start+n-1 )
+          CALL rs_g2r( psi, ibnd_start+b0+i-2 )
           DO ir = 1, boxtot
              z = psic( box_beta(ir) ) * CONJG( xkphase(ir) )
              wblk(ir,2*i-1) = DBLE(z) ; wblk(ir,2*i) = AIMAG(z)
@@ -3443,7 +3636,7 @@ MODULE realus
     !
     IF ( dffts%has_task_groups ) CALL errore( 's_psi_rs_k_block', 'task_groups not implemented', 1 )
     nb  = MIN( rs_block, m )
-    nnr = dffts%nnr
+    nnr = rs_nnr()
     ALLOCATE( outb(MAX(boxtot,1),2*nb), bec2(nhm,2*nb), w2(nhm,2*nb) )
     CALL set_xkphase( current_k )
     faca = SQRT(omega)
@@ -3472,7 +3665,7 @@ MODULE realus
              psic( box_beta(ir) ) = psic( box_beta(ir) ) + &
                   xkphase(ir) * CMPLX( outb(ir,2*i-1), outb(ir,2*i), KIND=DP )
           ENDDO
-          CALL fwfft_orbital_k( spsi, b0+i-1, m, add_to_orbital=.TRUE. )
+          CALL rs_r2g_add( spsi, b0+i-1 )
        ENDDO
     ENDDO
     !

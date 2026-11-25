@@ -474,6 +474,8 @@ SUBROUTINE electrons_scf ( printout, exxen )
                                    oscdft_print_ns
 #endif
   !
+  USE realus,               ONLY : rs_coarse_check
+  !
   IMPLICIT NONE
   !
   INTEGER, INTENT (IN) :: printout
@@ -649,6 +651,9 @@ SUBROUTINE electrons_scf ( printout, exxen )
         ethr = MAX( ethr, 1.D-13 )
         !
      ENDIF
+     !
+     ! ... real-space projectors: leave the coarse FFT grid once the scf error is small
+     IF ( iter > 1 ) CALL rs_coarse_check( dr2, nelec )
      !
      first = ( iter == 1 )
      !

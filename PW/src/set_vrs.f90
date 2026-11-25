@@ -16,6 +16,7 @@ SUBROUTINE set_vrs( vrs, vltot, vr, kedtau, kedtaur, nrxx, nspin, doublegrid )
   USE xc_lib,          ONLY : xclib_dft_is
   USE fft_base,        ONLY : dffts, dfftp
   USE fft_interfaces,  ONLY : fft_interpolate
+  USE realus,          ONLY : rs_update_vc
   !
   IMPLICIT NONE
   !
@@ -59,6 +60,10 @@ SUBROUTINE set_vrs( vrs, vltot, vr, kedtau, kedtaur, nrxx, nspin, doublegrid )
      IF (doublegrid) CALL fft_interpolate( dfftp, vrs(:, is), dffts, vrs(:, is) )
      IF (xclib_dft_is('meta')) CALL fft_interpolate( dfftp, kedtaur(:,is), dffts, kedtau(:,is) )
   ENDDO
+  !
+  ! ... local potential on the coarse grid of the real-space projector path, if any
+  !
+  CALL rs_update_vc( vrs, nrxx, nspin )
   !
   !$acc update device(vrs)
   !
