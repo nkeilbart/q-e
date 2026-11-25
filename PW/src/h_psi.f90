@@ -113,6 +113,7 @@ SUBROUTINE h_psi_( lda, n, m, psi, hpsi )
   USE xc_lib,                  ONLY: exx_is_active, xclib_dft_is
   USE sci_mod,                 ONLY: p_psi
   USE fft_helper_subroutines
+  USE hs_psi_fused,            ONLY: defer_vnl
   !
 #if defined(__OSCDFT)
   USE plugin_flags,            ONLY : use_oscdft
@@ -260,7 +261,10 @@ SUBROUTINE h_psi_( lda, n, m, psi, hpsi )
      CALL start_clock( 'h_psi:calbec' )
      CALL calbec(offload_type, n, vkb, psi, becp, m )
      CALL stop_clock( 'h_psi:calbec' )
-     if (use_gpu) then
+     if (defer_vnl) then
+       ! V_NL|psi> is added by the caller (hs_psi) together with S|psi>
+       continue
+     else if (use_gpu) then
        CALL add_vuspsi_acc( lda, n, m, hpsi )
      else
        CALL add_vuspsi( lda, n, m, hpsi )

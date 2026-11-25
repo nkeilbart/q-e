@@ -536,6 +536,10 @@ SUBROUTINE diag_bands( iter, ik, avg_iter )
     !-----------------------------------------------------------------------
     !! Complex Hamiltonian diagonalization.
     !
+    USE david_hs_fused,  ONLY : hs_psi_fused_ptr
+    USE hs_psi_fused,    ONLY : hs_fused_ok
+    USE mp_bands,        ONLY : use_bgrp_in_hpsi, nbgrp
+    !
     IMPLICIT NONE
     !
     ! ... local variables
@@ -750,9 +754,13 @@ SUBROUTINE diag_bands( iter, ik, avg_iter )
              !
           ELSE
              !
+             ! ... fused H|psi> + S|psi> (one sweep over vkb) when available
+             IF ( hs_fused_ok() .AND. .NOT. ( use_bgrp_in_hpsi .AND. nbgrp > 1 ) ) &
+                hs_psi_fused_ptr => hs_psi
              CALL cegterg ( h_psi, s_psi, okvan, g_psi, &
                             npw, npwx, nbnd, nbndx, npol, evc, ethr, &
                             et(1, ik), btype(1,ik), notconv, lrot, dav_iter, nhpsi )
+             NULLIFY( hs_psi_fused_ptr )
              !
           END IF
           !

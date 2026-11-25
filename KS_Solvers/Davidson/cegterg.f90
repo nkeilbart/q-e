@@ -15,6 +15,18 @@
 #define ONE  ( 1.D0, 0.D0 )
 !
 !----------------------------------------------------------------------------
+MODULE david_hs_fused
+  !----------------------------------------------------------------------------
+  !! Optional hook for cegterg: if hs_psi_fused_ptr is associated (and uspp is
+  !! true) cegterg calls hs_psi_fused_ptr(npwx,npw,nvec,psi,hpsi,spsi) once
+  !! instead of h_psi_ptr followed by s_psi_ptr. The caller must nullify it
+  !! after the call to cegterg. Not used by pcegterg.
+  IMPLICIT NONE
+  SAVE
+  PROCEDURE(), POINTER :: hs_psi_fused_ptr => NULL()
+END MODULE david_hs_fused
+!
+!----------------------------------------------------------------------------
 SUBROUTINE cegterg( h_psi_ptr, s_psi_ptr, uspp, g_psi_ptr, &
                     npw, npwx, nvec, nvecx, npol, evc, ethr, &
                     e, btype, notcnv, lrot, dav_iter, nhpsi )
@@ -33,6 +45,7 @@ SUBROUTINE cegterg( h_psi_ptr, s_psi_ptr, uspp, g_psi_ptr, &
   USE util_param,    ONLY : DP
   USE mp_bands_util, ONLY : intra_bgrp_comm, inter_bgrp_comm, root_bgrp_id,&
                             nbgrp, my_bgrp_id, me_bgrp, root_bgrp
+  USE david_hs_fused, ONLY : hs_psi_fused_ptr
   USE mp,            ONLY : mp_sum, mp_gather, mp_bcast, mp_size,&
                             mp_type_create_column_section, mp_type_free
   USE device_memcpy_m, ONLY : dev_memcpy, dev_memset
@@ -187,11 +200,14 @@ SUBROUTINE cegterg( h_psi_ptr, s_psi_ptr, uspp, g_psi_ptr, &
   !
   ! ... hpsi contains h times the basis vectors
   !
-  CALL h_psi_ptr( npwx, npw, nvec, psi, hpsi ) ; nhpsi = nhpsi + nvec
-  !
   ! ... spsi contains s times the basis vectors
   !
-  IF ( uspp ) CALL s_psi_ptr( npwx, npw, nvec, psi, spsi )
+  IF ( uspp .AND. ASSOCIATED(hs_psi_fused_ptr) ) THEN
+     CALL hs_psi_fused_ptr( npwx, npw, nvec, psi, hpsi, spsi ) ; nhpsi = nhpsi + nvec
+  ELSE
+     CALL h_psi_ptr( npwx, npw, nvec, psi, hpsi ) ; nhpsi = nhpsi + nvec
+     IF ( uspp ) CALL s_psi_ptr( npwx, npw, nvec, psi, spsi )
+  ENDIF
   !
   ! ... hc contains the projection of the hamiltonian onto the reduced 
   ! ... space vc contains the eigenvectors of hc
@@ -460,9 +476,13 @@ SUBROUTINE cegterg( h_psi_ptr, s_psi_ptr, uspp, g_psi_ptr, &
      !
      ! ... here compute the hpsi and spsi of the new functions
      !
-     CALL h_psi_ptr( npwx, npw, notcnv, psi(1,nb1), hpsi(1,nb1) ) ; nhpsi = nhpsi + notcnv
-     !
-     IF ( uspp ) CALL s_psi_ptr( npwx, npw, notcnv, psi(1,nb1), spsi(1,nb1) )
+     IF ( uspp .AND. ASSOCIATED(hs_psi_fused_ptr) ) THEN
+        CALL hs_psi_fused_ptr( npwx, npw, notcnv, psi(1,nb1), hpsi(1,nb1), spsi(1,nb1) )
+        nhpsi = nhpsi + notcnv
+     ELSE
+        CALL h_psi_ptr( npwx, npw, notcnv, psi(1,nb1), hpsi(1,nb1) ) ; nhpsi = nhpsi + notcnv
+        IF ( uspp ) CALL s_psi_ptr( npwx, npw, notcnv, psi(1,nb1), spsi(1,nb1) )
+     ENDIF
      !
      ! ... update the reduced hamiltonian
      !
