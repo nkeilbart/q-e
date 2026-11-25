@@ -1035,6 +1035,16 @@ MODULE input_parameters
         !! US contributions are added in real space.
 
         LOGICAL :: tq_smoothing = .false.
+
+        REAL(DP) :: fft_coarse_factor = 1.5_DP
+          !! the first scf iterations apply V_loc (and real-space projectors) on a
+          !! coarser FFT grid holding the G sphere of radius fft_coarse_factor*sqrt(gkcut);
+          !! the smooth grid corresponds to 2. Values >= 2 disable the coarse grid.
+
+        REAL(DP) :: fft_coarse_thr = 1.0E-6_DP
+          !! the run switches from the coarse to the smooth FFT grid when the estimated
+          !! scf accuracy per electron (Ry) falls below this value; the scf never ends
+          !! on the coarse grid. 0 keeps the coarse grid until convergence is reached.
         !! US augmentation charge is smoothed before use.
 
         LOGICAL :: tbeta_smoothing = .false.
@@ -1079,6 +1089,7 @@ MODULE input_parameters
           diis_nchmix, diis_nrot, diis_rothr, diis_ethr, diis_chguess, &
           mixing_mode, mixing_beta, mixing_ndim, mixing_fixed_ns,      &
           tqr, tq_smoothing, tbeta_smoothing,                          &
+          fft_coarse_factor, fft_coarse_thr,                           &
           diago_cg_maxiter, diago_david_ndim, diago_rmm_ndim,          &
           diago_rmm_conv, diago_gs_nblock, diagonalization,            &
           startingpot, startingwfc , conv_thr,                         &

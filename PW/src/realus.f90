@@ -60,6 +60,10 @@ MODULE realus
   !! radius QE_RS_GRIDFAC * sqrt(gkcut) instead of 2 * sqrt(gkcut)
   TYPE(fft_type_descriptor) :: dfftc
   LOGICAL :: rs_coarse_allowed = .TRUE.
+  REAL(DP) :: rs_gridfac = 1.5_DP
+  !! input fft_coarse_factor (env QE_RS_GRIDFAC overrides it, for tests)
+  REAL(DP) :: rs_coarse_thr = 1.0D-6
+  !! input fft_coarse_thr (env QE_RS_COARSE_TR2 overrides it, for tests)
   REAL(DP), ALLOCATABLE :: vrs_c(:,:)
   !! local potential on the coarse grid
   LOGICAL :: rs_free_vkb = .FALSE.
@@ -138,6 +142,7 @@ MODULE realus
   PUBLIC :: rs_cost_model, env_real
   PUBLIC :: rs_becp_push, rs_becp_flush, rs_becp_ready, rs_free_vkb
   PUBLIC :: rs_coarse, rs_update_vc, rs_coarse_check, rs_coarse_setup, vloc_psi_k_coarse
+  PUBLIC :: rs_gridfac, rs_coarse_thr
   !
   CONTAINS
   
@@ -3362,7 +3367,7 @@ MODULE realus
     !
     IF ( done .OR. .NOT. rs_coarse_allowed ) RETURN
     done = .TRUE.
-    fac = env_real( 'QE_RS_GRIDFAC', 1.5_DP )
+    fac = env_real( 'QE_RS_GRIDFAC', rs_gridfac )
     IF ( fac >= 2.0_DP - 1.0D-6 .OR. gamma_only ) RETURN
     IF ( fac < 1.0_DP ) CALL errore( 'rs_coarse_setup', 'QE_RS_GRIDFAC must be >= 1', 1 )
     CALL fft_type_init( dfftc, smap, "wave", gamma_only, ( nproc_bgrp > 1 ), intra_bgrp_comm, &
@@ -3407,7 +3412,7 @@ MODULE realus
   SUBROUTINE rs_coarse_check( dr2, nelec, force )
     !--------------------------------------------------------------------------
     !! The coarse grid is used only while the SCF error is large: when the
-    !! estimated SCF accuracy dr2 falls below QE_RS_COARSE_TR2 (default 1e-6 Ry)
+    !! estimated SCF accuracy dr2 falls below fft_coarse_thr (input, default 1e-6 Ry)
     !! per electron, the real-space projector path goes back to the smooth
     !! grid, so that the converged result is that of the exact product grid.
     !! QE_RS_COARSE_TR2=0 keeps the coarse grid to the end.
@@ -3420,7 +3425,7 @@ MODULE realus
     !
     IF ( .NOT. rs_coarse ) RETURN
     force_ = .FALSE. ; IF ( PRESENT(force) ) force_ = force
-    IF ( .NOT. force_ .AND. dr2 >= env_real( 'QE_RS_COARSE_TR2', 1.0D-6 ) * MAX( 1.0_DP, nelec ) ) RETURN
+    IF ( .NOT. force_ .AND. dr2 >= env_real( 'QE_RS_COARSE_TR2', rs_coarse_thr ) * MAX( 1.0_DP, nelec ) ) RETURN
     rs_coarse = .FALSE.
     IF ( ALLOCATED( boxrad_beta ) ) DEALLOCATE( boxrad_beta )
     IF ( ALLOCATED( vrs_c ) ) DEALLOCATE( vrs_c )

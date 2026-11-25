@@ -2790,6 +2790,33 @@ input_description -distribution {Quantum ESPRESSO} -package PWscf -program pw.x 
         }
     }
 
+
+    var fft_coarse_factor -type REAL {
+        default { 1.5 }
+        info {
+            For ultrasoft/PAW k-point CPU runs handled by the automatic real-space
+            machinery: during the first scf iterations the product of the local
+            potential with the wavefunctions (and the real-space projectors, if
+            used) is done on a coarser FFT grid, holding the G sphere of radius
+            fft_coarse_factor * (sqrt(ecutwfc)+|k|). The standard smooth grid
+            corresponds to 2. Values >= 2 disable the coarse grid. The run always
+            ends on the smooth grid, so the converged result does not depend on
+            this value; it only changes the cost of the first iterations.
+        }
+    }
+
+    var fft_coarse_thr -type REAL {
+        default { 1.D-6 }
+        info {
+            The run switches from the coarse to the smooth FFT grid (see
+            @ref fft_coarse_factor) when the estimated scf accuracy per electron,
+            in Ry, falls below fft_coarse_thr. A larger value switches earlier
+            (less time on the coarse grid), a smaller value later. If convergence
+            is reached while the coarse grid is still in use, the run switches and
+            continues instead of stopping. 0 keeps the coarse grid until then.
+        }
+    }
+
     #
     # NAMELIST &IONS
     #

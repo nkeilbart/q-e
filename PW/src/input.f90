@@ -348,7 +348,7 @@ SUBROUTINE control_iosys()
 
   USE Coul_cut_2D,  ONLY :  do_cutoff_2D 
 
-  USE realus,                ONLY : real_space_ => real_space
+  USE realus,                ONLY : real_space_ => real_space, rs_gridfac, rs_coarse_thr
 
   USE qmmm,                  ONLY : qmmm_config
   !
@@ -394,6 +394,7 @@ SUBROUTINE control_iosys()
   USE input_parameters, ONLY : exx_maxstep, electron_maxstep, mixing_mode, mixing_beta, &
                                mixing_ndim, mixing_fixed_ns, conv_thr,     &
                                tqr, tq_smoothing, tbeta_smoothing,         &
+                               fft_coarse_factor, fft_coarse_thr,          &
                                diago_thr_init,                             &
                                diago_cg_maxiter,                           &
                                diago_david_ndim, diago_rmm_ndim,           &
@@ -1270,6 +1271,8 @@ SUBROUTINE control_iosys()
   tqr_        = tqr
   real_space_ = real_space
   tq_smoothing_ = tq_smoothing
+  rs_gridfac    = fft_coarse_factor
+  rs_coarse_thr = fft_coarse_thr
   tbeta_smoothing_ = tbeta_smoothing
   !
   ! SYMMETRY
