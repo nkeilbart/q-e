@@ -383,18 +383,34 @@ CONTAINS
        !
        n = desc%ngw
        !
+#if defined(_OPENACC)
        !$acc kernels
        psi = 0.0d0
        !$acc end kernels
+#else
+       !$omp parallel do
+       DO ig = 1, SIZE(psi)
+          psi(ig) = (0.0d0,0.0d0)
+       ENDDO
+       !$omp end parallel do
+#endif
        !
        IF( PRESENT(ca) ) THEN
+#if defined(_OPENACC)
           !$acc parallel loop present_or_copyin(ca)
+#else
+          !$omp parallel do
+#endif
           DO ig = 1, n
             psi(desc%nlm(ig)) = CONJG(c(ig,1)) + ci * CONJG(ca(ig))
             psi(desc%nl(ig)) = c(ig,1) + ci * ca(ig)
           ENDDO
        ELSE
+#if defined(_OPENACC)
           !$acc parallel loop
+#else
+          !$omp parallel do
+#endif
           DO ig = 1, n
             psi(desc%nlm(ig)) = CONJG(c(ig,1))
             psi(desc%nl(ig)) = c(ig,1)
@@ -485,9 +501,17 @@ CONTAINS
         ENDDO
         !
      ELSE
+#if defined(_OPENACC)
         !$acc kernels
         psi = (0.d0,0.d0)
         !$acc end kernels
+#else
+        !$omp parallel do
+        DO ig = 1, SIZE(psi)
+           psi(ig) = (0.d0,0.d0)
+        ENDDO
+        !$omp end parallel do
+#endif
         !
 #if defined(_OPENACC)
         !$acc parallel loop
@@ -693,7 +717,11 @@ CONTAINS
        n = desc%ngw
        !
        IF( PRESENT(vout2) ) THEN
+#if defined(_OPENACC)
           !$acc parallel loop present_or_copyout(vout2)
+#else
+          !$omp parallel do private(fp,fm)
+#endif
           DO ig = 1, n
              fp = vin(desc%nl(ig))+vin(desc%nlm(ig))
              fm = vin(desc%nl(ig))-vin(desc%nlm(ig))
@@ -701,7 +729,11 @@ CONTAINS
              vout2(ig) = CMPLX(AIMAG(fp),-DBLE(fm),kind=DP)
           ENDDO
        ELSE
+#if defined(_OPENACC)
           !$acc parallel loop
+#else
+          !$omp parallel do
+#endif
           DO ig = 1, n
              vout1(ig,1) = vin(desc%nl(ig))
           ENDDO
@@ -780,7 +812,11 @@ CONTAINS
      ELSE
         !
         igmax = MIN(desc%ngw,SIZE(vout(:,1)))
+#if defined(_OPENACC)
         !$acc parallel loop
+#else
+        !$omp parallel do
+#endif
         DO ig = 1, igmax
           vout(ig,1) = vin(desc%nl(igk(ig)))
         ENDDO

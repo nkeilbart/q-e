@@ -106,7 +106,11 @@ SUBROUTINE vloc_psi_gamma_acc( lda, n, m, psi, v, hpsi )
         !
         brange = 1
         IF ( ibnd<m ) brange = 2
+#if defined(_OPENACC)
         !$acc parallel loop collapse(2)
+#else
+        !$omp parallel do collapse(2)
+#endif
         DO idx = 1, brange
            DO j = 1, n
               psi1(j,idx) = psi(j,ibnd+idx-1)
@@ -114,8 +118,12 @@ SUBROUTINE vloc_psi_gamma_acc( lda, n, m, psi, v, hpsi )
         END DO
         !
         CALL wave_g2r( psi1(:,1:brange), psic, dffts )
-        !        
+        !
+#if defined(_OPENACC)
         !$acc parallel loop
+#else
+        !$omp parallel do
+#endif
         DO j = 1, dffts_nnr
            psic(j) = psic(j) * v(j)
         ENDDO
@@ -125,7 +133,11 @@ SUBROUTINE vloc_psi_gamma_acc( lda, n, m, psi, v, hpsi )
         fac=1.d0
         IF ( ibnd<m ) fac=0.5d0
         !
+#if defined(_OPENACC)
         !$acc parallel loop
+#else
+        !$omp parallel do
+#endif
         DO j = 1, n
           hpsi(j,ibnd) = hpsi(j,ibnd) + fac*psi1(j,1)
           IF ( ibnd<m ) hpsi(j,ibnd+1) = hpsi(j,ibnd+1) + fac*psi1(j,2)
@@ -233,20 +245,32 @@ SUBROUTINE vloc_psi_k_acc( lda, n, m, psi, v, hpsi )
      DO ibnd = 1, m
         !
         idx = 1
+#if defined(_OPENACC)
         !$acc parallel loop
+#else
+        !$omp parallel do
+#endif
         DO j = 1, n
            psi1(j,idx) = psi(j,ibnd+idx-1)
         END DO
         CALL wave_g2r( psi1(:,idx:idx), psic, dffts, igk=igk_k(:,current_k) )
         !
-        !$acc parallel loop 
+#if defined(_OPENACC)
+        !$acc parallel loop
+#else
+        !$omp parallel do
+#endif
         DO j = 1, dffts_nnr
            psic(j) = psic(j) * v(j)
         ENDDO
         !
         CALL wave_r2g( psic, psi1(:,:), dffts, igk=igk_k(:,current_k) )
         !
+#if defined(_OPENACC)
         !$acc parallel loop
+#else
+        !$omp parallel do
+#endif
         DO i = 1, n
            hpsi(i,ibnd) = hpsi(i,ibnd) + psi1(i,idx)
         ENDDO
