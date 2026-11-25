@@ -30,6 +30,9 @@ SUBROUTINE wfcinit()
                                    iunwfc, iunsat, diropn, xmlfile, restart_dir
   USE buffers,              ONLY : open_buffer, close_buffer, get_buffer, save_buffer
   USE uspp,                 ONLY : nkb, vkb
+  USE realus,               ONLY : rs_free_vkb
+  USE uspp_init,            ONLY : init_us_2
+  USE klist,                ONLY : igk_k, xk
   USE wavefunctions,        ONLY : evc
   USE wvfct,                ONLY : nbnd, npwx, current_k, et
   USE wannier_new,          ONLY : use_wannier
@@ -203,7 +206,8 @@ SUBROUTINE wfcinit()
      !
      ! ... More Hpsi initialization: nonlocal pseudopotential projectors |beta>
      !
-     IF ( nkb > 0 ) CALL init_us_2( ngk(ik), igk_k(1,ik), xk(1,ik), vkb , use_gpu)
+     IF ( nkb > 0 .AND. .NOT. rs_free_vkb ) &
+        CALL init_us_2( ngk(ik), igk_k(1,ik), xk(1,ik), vkb , use_gpu)
      !
      ! ... Needed for DFT+U
      !

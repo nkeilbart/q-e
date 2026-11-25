@@ -20,6 +20,9 @@ SUBROUTINE c_bands( iter )
   USE buffers,              ONLY : get_buffer, save_buffer, close_buffer
   USE klist,                ONLY : nkstot, nks, ngk, igk_k, xk
   USE uspp,                 ONLY : vkb, nkb
+  USE realus,               ONLY : rs_free_vkb
+  USE uspp_init,            ONLY : init_us_2
+  USE klist,                ONLY : igk_k, xk
   USE gvect,                ONLY : g
   USE wvfct,                ONLY : et, nbnd, npwx, current_k
   USE control_flags,        ONLY : ethr, isolve, restart, use_gpu, iverbosity
@@ -108,7 +111,8 @@ SUBROUTINE c_bands( iter )
      !
      ! ... More stuff needed by the hamiltonian: nonlocal projectors
      !
-     IF ( nkb > 0 ) CALL init_us_2( ngk(ik), igk_k(1,ik), xk(1,ik), vkb, .true. )
+     IF ( nkb > 0 .AND. .NOT. rs_free_vkb ) &
+        CALL init_us_2( ngk(ik), igk_k(1,ik), xk(1,ik), vkb, .true. )
      !
      ! ... read in wavefunctions from the previous iteration
      !
@@ -195,6 +199,9 @@ SUBROUTINE diag_bands( iter, ik, avg_iter )
   USE io_global,            ONLY : stdout
   USE io_files,             ONLY : nwordwfc, iunefieldp, iunefieldm
   USE uspp,                 ONLY : vkb, nkb, okvan
+  USE realus,               ONLY : rs_free_vkb
+  USE uspp_init,            ONLY : init_us_2
+  USE klist,                ONLY : igk_k, xk
   USE gvect,                ONLY : gstart
   USE wvfct,                ONLY : g2kin, nbndx, et, nbnd, npwx, btype
   USE control_flags,        ONLY : ethr, lscf, max_cg_iter, isolve, &
@@ -490,7 +497,13 @@ SUBROUTINE diag_bands( iter, ik, avg_iter )
        ! ... hamiltonian used in g_psi to evaluate the correction
        ! ... to the trial eigenvectors
        !
+       IF ( rs_free_vkb ) THEN
+          ! ... real-space projectors: vkb is needed only here, for the preconditioner
+          ALLOCATE( vkb(npwx,nkb) )
+          CALL init_us_2( npw, igk_k(1,ik), xk(1,ik), vkb, .true. )
+       ENDIF
        CALL usnldiag( npw, npol, h_diag, s_diag )
+       IF ( rs_free_vkb ) DEALLOCATE( vkb )
 #if defined (__OSCDFT)
        IF (use_oscdft .AND. (oscdft_ctx%inp%oscdft_type==1)) CALL oscdft_h_diag(oscdft_ctx, h_diag)
 #endif
@@ -731,7 +744,13 @@ SUBROUTINE diag_bands( iter, ik, avg_iter )
        ! ... hamiltonian used in g_psi to evaluate the correction
        ! ... to the trial eigenvectors
        !
+       IF ( rs_free_vkb ) THEN
+          ! ... real-space projectors: vkb is needed only here, for the preconditioner
+          ALLOCATE( vkb(npwx,nkb) )
+          CALL init_us_2( npw, igk_k(1,ik), xk(1,ik), vkb, .true. )
+       ENDIF
        CALL usnldiag( npw, npol, h_diag, s_diag )
+       IF ( rs_free_vkb ) DEALLOCATE( vkb )
 #if defined (__OSCDFT)
        IF (use_oscdft .AND. (oscdft_ctx%inp%oscdft_type==1)) CALL oscdft_h_diag(oscdft_ctx, h_diag)
 #endif

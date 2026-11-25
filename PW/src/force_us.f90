@@ -18,6 +18,9 @@ SUBROUTINE force_us( forcenl )
   USE klist,                ONLY : nks, xk, ngk, igk_k
   USE gvect,                ONLY : g
   USE uspp,                 ONLY : nkb, vkb, qq_at, deeq, qq_so, deeq_nc, ofsbeta
+  USE realus,               ONLY : rs_free_vkb
+  USE uspp_init,            ONLY : init_us_2
+  USE klist,                ONLY : igk_k, xk
   USE uspp_param,           ONLY : upf, nh, nhm
   USE wvfct,                ONLY : nbnd, npwx, wg, et
   USE lsda_mod,             ONLY : lsda, current_spin, isk, nspin
@@ -52,6 +55,7 @@ SUBROUTINE force_us( forcenl )
   !
   CALL allocate_bec_type_acc( nkb, nbnd, becp, intra_bgrp_comm )
   CALL allocate_bec_type_acc( nkb, nbnd, becd, intra_bgrp_comm )
+  IF ( .NOT. ALLOCATED( vkb ) ) ALLOCATE( vkb(npwx,nkb) )
   ALLOCATE( vkb1(npwx,nkb) )
   !$acc data create(vkb1)
   ! 
@@ -168,6 +172,7 @@ SUBROUTINE force_us( forcenl )
   !
   !$acc end data
   DEALLOCATE( vkb1 )
+  IF ( rs_free_vkb ) DEALLOCATE( vkb )
   CALL deallocate_bec_type_acc( becd )
   CALL deallocate_bec_type_acc( becp )
   !

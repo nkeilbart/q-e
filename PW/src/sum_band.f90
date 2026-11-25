@@ -418,7 +418,7 @@ SUBROUTINE sum_band()
        USE uspp_init,              ONLY : init_us_2
        USE klist,                  ONLY : nelec
        USE control_flags,          ONLY : many_fft
-       USE realus,                 ONLY : real_space, rs_block, rs_becp_push, rs_becp_flush
+       USE realus,                 ONLY : real_space, rs_block, rs_becp_push, rs_becp_flush, rs_free_vkb
        USE wavefunctions,          ONLY : psic_nc
        !! psic_nc is allocated work space for noncolinear case
        !! FIXME: too many work spaces!
@@ -490,7 +490,8 @@ SUBROUTINE sum_band()
           !
           CALL start_clock( 'sum_band:init_us_2' )
           !
-          IF ( nkb > 0 ) CALL init_us_2( npw, igk_k(1,ik), xk(1,ik), vkb, .TRUE. )
+          IF ( nkb > 0 .AND. .NOT. rs_free_vkb ) &
+             CALL init_us_2( npw, igk_k(1,ik), xk(1,ik), vkb, .TRUE. )
           !
           CALL stop_clock( 'sum_band:init_us_2' )
           !

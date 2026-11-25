@@ -53,6 +53,10 @@ MODULE realus
   !
   LOGICAL :: real_space = .FALSE.
   INTEGER :: rs_block = 1
+  LOGICAL :: rs_free_vkb = .FALSE.
+  !! .true. when real-space projectors were chosen automatically for a plain
+  !! SCF run: the G-space projectors vkb(npwx,nkb) are then not kept in
+  !! memory; the few routines that need them allocate them temporarily
   LOGICAL :: rs_becp_ready = .FALSE.
   !! .true. if becp%k was filled by rs_becp_push/flush (sum_band density loop)
   REAL(DP), ALLOCATABLE :: pb_w(:,:)
@@ -123,7 +127,7 @@ MODULE realus
             fwfft_orbital_k, s_psir_k, calbec_rs_k, add_vuspsir_k
   PUBLIC :: rs_block, h_psi_rs_k_block, s_psi_rs_k_block, calbec_rs_k_block
   PUBLIC :: rs_cost_model, env_real
-  PUBLIC :: rs_becp_push, rs_becp_flush, rs_becp_ready
+  PUBLIC :: rs_becp_push, rs_becp_flush, rs_becp_ready, rs_free_vkb
   !
   CONTAINS
   

@@ -26,9 +26,9 @@ SUBROUTINE hinit0()
   USE beta_mod,         ONLY : init_tab_beta
   USE realus,           ONLY : generate_qpointlist, betapointlist, &
                                init_realspace_vars, real_space
-  USE realus,           ONLY : rs_cost_model, env_real
-  USE uspp,             ONLY : okvan
-  USE control_flags,    ONLY : gamma_only, use_gpu, isolve
+  USE realus,           ONLY : rs_cost_model, env_real, rs_free_vkb
+  USE uspp,             ONLY : okvan, vkb
+  USE control_flags,    ONLY : gamma_only, use_gpu, isolve, lscf, lmd, lbfgs, tstress
   USE noncollin_module, ONLY : noncolin
   USE bp,               ONLY : lelfield
   USE xc_lib,           ONLY : xclib_dft_is
@@ -180,6 +180,13 @@ SUBROUTINE hinit0()
      real_space = ( t_real < 0.9_dp * t_recip )
      WRITE( stdout, '(5X,"Projectors: estimated cost/band  real space",ES10.3,"  G space",ES10.3, &
             &"  -> using ",A)' ) t_real, t_recip, TRIM( MERGE( 'real space', 'G space   ', real_space ) )
+     ! ... plain SCF: vkb(npwx,nkb) is not kept in memory with real-space projectors
+     IF ( real_space .AND. lscf .AND. .NOT. ( lmd .OR. lbfgs .OR. tstress ) .AND. &
+          NINT( env_real( 'QE_RS_KEEPVKB', 0.0_dp ) ) /= 1 ) THEN
+        rs_free_vkb = .TRUE.
+        IF ( ALLOCATED( vkb ) ) DEALLOCATE( vkb )
+        WRITE( stdout, '(5X,"Projectors: G-space vkb is not kept in memory")' )
+     ENDIF
   ENDIF
   !
   IF (real_space ) THEN
