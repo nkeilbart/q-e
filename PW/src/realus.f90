@@ -1337,11 +1337,14 @@ MODULE realus
     !------------------------------------------------------------------------
     SUBROUTINE rs_cost_model( npw_g, t_real, t_recip )
       !------------------------------------------------------------------------
-      !! Rough cost per band (seconds x number of MPI ranks) of applying the
-      !! nonlocal projectors (calbec + V_NL + S) in real space and in G space.
-      !! Real space: work on (sphere points x projectors) plus one extra
-      !! smooth-grid FFT per band; G space: three sweeps over npw x nkb.
-      !! Constants measured with MKL on the development machine (prototype).
+      !! Estimated cost per band (seconds x number of MPI ranks) of applying
+      !! V_loc and the nonlocal projectors (calbec + V_NL + S) with real-space
+      !! and with G-space projectors.
+      !!   real space: work on (sphere points x projectors) + 3 smooth-grid FFTs
+      !!   G space   : three sweeps over npw x nkb          + 2 smooth-grid FFTs
+      !! The unit costs are not constants of the code: they are measured here,
+      !! at start-up, on the machine and with the libraries the job runs on
+      !! (rs_calibrate), and averaged over the MPI ranks.
       !
       USE constants,  ONLY : fpi
       USE ions_base,  ONLY : nat, ityp
@@ -1354,30 +1357,160 @@ MODULE realus
       !
       INTEGER, INTENT(IN)   :: npw_g
       REAL(DP), INTENT(OUT) :: t_real, t_recip
-      REAL(DP), PARAMETER :: c_real = 2.0D-9, c_fft = 1.5D-8, c_recip = 7.5D-10
-      REAL(DP) :: nrs, nrb, work
+      REAL(DP) :: c_real, c_recip, t_fft
+      REAL(DP) :: nrs, work
       INTEGER  :: ia, nt
       !
       ! ... the estimate is made for the smooth grid, on which the run ends;
       ! ... the coarse grid of the first scf iterations is set up afterwards
       rs_coarse_allowed = .FALSE.
       CALL beta_filter_setup()
+      CALL rs_calibrate( c_real, c_recip, t_fft )
       nrs  = DBLE(dffts%nr1) * DBLE(dffts%nr2) * DBLE(dffts%nr3)
-      nrb  = rs_ngrid()
       work = 0.0_DP
       DO ia = 1, nat
          nt = ityp(ia)
          IF ( .not. upf(nt)%tvanp ) CYCLE
-         work = work + fpi/3.0_DP * (boxrad_beta(nt)*alat)**3 * nrb/omega * nh(nt)
+         work = work + fpi/3.0_DP * (boxrad_beta(nt)*alat)**3 * nrs/omega * nh(nt)
       ENDDO
-      ! FFTs per band: 3 on the projector grid (real space), 2 on the smooth grid (G space)
-      t_real  = c_real * work + 3.0_DP * c_fft * nrb
-      t_recip = c_recip * DBLE(npw_g) * DBLE(nkb) + 2.0_DP * c_fft * nrs
-      !
+      t_real  = c_real * work + 3.0_DP * t_fft
+      t_recip = c_recip * DBLE(npw_g) * DBLE(nkb) + 2.0_DP * t_fft
+      WRITE( stdout, '(5X,"Projectors: measured unit costs  real space",ES10.3," s/(point x projector)", &
+           &"  G space",ES10.3," s/(PW x projector)  FFT",ES10.3," s x ranks")' ) c_real, c_recip, t_fft
       DEALLOCATE( boxrad_beta )
       rs_coarse_allowed = .TRUE.
       !
     END SUBROUTINE rs_cost_model
+    !
+    !------------------------------------------------------------------------
+    SUBROUTINE rs_calibrate( c_real, c_recip, t_fft )
+      !------------------------------------------------------------------------
+      !! Measures the unit costs used by rs_cost_model with short samples of
+      !! the actual kernels (all ranks at the same time, as in the run):
+      !!  c_real : seconds per (sphere point x projector) per band for the three
+      !!           real-space kernels (gather, DGEMM projection, two DGEMM
+      !!           applications, scatter), block of 16 bands
+      !!  c_recip: seconds per (plane wave x projector) per band for the three
+      !!           G-space sweeps (ZGEMM)
+      !!  t_fft  : wall time of one smooth-grid wavefunction FFT times the
+      !!           number of ranks
+      !! Best of a few repetitions; results averaged over all ranks so that
+      !! every rank takes the same decision.
+      !
+      USE wavefunctions,  ONLY : psic
+      USE fft_base,       ONLY : dffts
+      USE fft_interfaces, ONLY : invfft, fwfft
+      USE mp_images,      ONLY : intra_image_comm, nproc_image
+      USE mp_bands,       ONLY : nproc_bgrp
+      USE mp,             ONLY : mp_sum, mp_barrier
+      !
+      IMPLICIT NONE
+      !
+      REAL(DP), INTENT(OUT) :: c_real, c_recip, t_fft
+      INTEGER, PARAMETER :: np = 1536, nk = 256, mz = 32   ! G-space sample: npw x nkb x bands
+      INTEGER, PARAMETER :: mb = 640, nhs = 16, nat_s = 24, nb = 16   ! real-space sample
+      INTEGER, PARAMETER :: nrep = 4
+      COMPLEX(DP), PARAMETER :: one = (1.0_DP,0.0_DP), zero = (0.0_DP,0.0_DP)
+      COMPLEX(DP), ALLOCATABLE :: v(:,:), p(:,:), b(:,:), src(:), dst(:)
+      REAL(DP), ALLOCATABLE :: bs(:,:), w(:,:), bec(:,:), o(:,:)
+      INTEGER, ALLOCATABLE :: idx(:)
+      INTEGER(KIND=8) :: c0, c1, rate
+      REAL(DP) :: t, tbest, tot(3)
+      INTEGER :: irep, i, j, ia, ib, nsrc
+      !
+      CALL start_clock( 'rs_calibrate' )
+      CALL SYSTEM_CLOCK( COUNT_RATE=rate )
+      !
+      ! ... G-space sample: one ZGEMM sweep <beta|psi>; the three sweeps cost the same
+      ALLOCATE( v(np,nk), p(np,mz), b(nk,mz) )
+      DO j = 1, nk
+         DO i = 1, np
+            v(i,j) = CMPLX( SIN(0.37_DP*i+j), COS(0.11_DP*i*j), KIND=DP )
+         ENDDO
+      ENDDO
+      DO j = 1, mz
+         DO i = 1, np
+            p(i,j) = CMPLX( COS(0.23_DP*i*j), SIN(0.19_DP*i+j), KIND=DP )
+         ENDDO
+      ENDDO
+      CALL mp_barrier( intra_image_comm )
+      tbest = HUGE(1.0_DP)
+      DO irep = 1, nrep
+         CALL SYSTEM_CLOCK( c0 )
+         CALL ZGEMM( 'C', 'N', nk, mz, np, one, v, np, p, np, zero, b, nk )
+         CALL SYSTEM_CLOCK( c1 )
+         tbest = MIN( tbest, DBLE(c1-c0)/DBLE(rate) )
+      ENDDO
+      c_recip = 3.0_DP * tbest / ( DBLE(np) * DBLE(nk) * DBLE(mz) )
+      DEALLOCATE( v, p, b )
+      !
+      ! ... real-space sample: nat_s atoms with mb sphere points and nhs projectors each,
+      ! ... a block of nb bands: gather, projection, V_NL and S application, scatter
+      nsrc = 8 * mb * nat_s
+      ALLOCATE( bs(mb*nat_s,nhs), w(mb*nat_s,2*nb), bec(nhs,2*nb), o(mb*nat_s,4*nb), &
+                idx(mb*nat_s), src(nsrc), dst(nsrc) )
+      DO j = 1, nhs
+         DO i = 1, mb*nat_s
+            bs(i,j) = SIN( 0.013_DP*i*j )
+         ENDDO
+      ENDDO
+      DO i = 1, mb*nat_s
+         idx(i) = 1 + MOD( (i-1)*7 + ((i-1)/8)*37, nsrc )
+      ENDDO
+      DO i = 1, nsrc
+         src(i) = CMPLX( SIN(0.01_DP*i), COS(0.02_DP*i), KIND=DP )
+      ENDDO
+      dst = zero
+      CALL mp_barrier( intra_image_comm )
+      tbest = HUGE(1.0_DP)
+      DO irep = 1, nrep
+         CALL SYSTEM_CLOCK( c0 )
+         DO ib = 1, nb
+            DO i = 1, mb*nat_s
+               w(i,2*ib-1) = DBLE( src(idx(i)) ) ; w(i,2*ib) = AIMAG( src(idx(i)) )
+            ENDDO
+         ENDDO
+         DO ia = 1, nat_s
+            CALL DGEMM( 'T', 'N', nhs, 2*nb, mb, 1.0_DP, bs((ia-1)*mb+1,1), mb*nat_s, &
+                        w((ia-1)*mb+1,1), mb*nat_s, 0.0_DP, bec, nhs )
+            CALL DGEMM( 'N', 'N', mb, 2*nb, nhs, 1.0_DP, bs((ia-1)*mb+1,1), mb*nat_s, &
+                        bec, nhs, 0.0_DP, o((ia-1)*mb+1,1), mb*nat_s )
+            CALL DGEMM( 'N', 'N', mb, 2*nb, nhs, 1.0_DP, bs((ia-1)*mb+1,1), mb*nat_s, &
+                        bec, nhs, 0.0_DP, o((ia-1)*mb+1,2*nb+1), mb*nat_s )
+         ENDDO
+         DO ib = 1, 2*nb
+            DO i = 1, mb*nat_s
+               dst(idx(i)) = dst(idx(i)) + CMPLX( o(i,2*ib-1), o(i,2*ib), KIND=DP )
+            ENDDO
+         ENDDO
+         CALL SYSTEM_CLOCK( c1 )
+         tbest = MIN( tbest, DBLE(c1-c0)/DBLE(rate) )
+      ENDDO
+      c_real = tbest / ( DBLE(mb*nat_s) * DBLE(nhs) * DBLE(nb) )
+      DEALLOCATE( bs, w, bec, o, idx, src, dst )
+      !
+      ! ... one smooth-grid wavefunction FFT (collective over the band group)
+      psic(1:dffts%nnr) = (1.0D-3,0.0_DP)
+      CALL mp_barrier( intra_image_comm )
+      tbest = HUGE(1.0_DP)
+      DO irep = 1, nrep
+         CALL SYSTEM_CLOCK( c0 )
+         CALL invfft( 'Wave', psic, dffts )
+         CALL fwfft( 'Wave', psic, dffts )
+         CALL SYSTEM_CLOCK( c1 )
+         tbest = MIN( tbest, 0.5_DP*DBLE(c1-c0)/DBLE(rate) )
+      ENDDO
+      t_fft = tbest * DBLE(nproc_bgrp)
+      psic(1:dffts%nnr) = zero
+      !
+      ! ... same numbers on every rank
+      tot = (/ c_real, c_recip, t_fft /)
+      CALL mp_sum( tot, intra_image_comm )
+      tot = tot / DBLE(nproc_image)
+      c_real = tot(1) ; c_recip = tot(2) ; t_fft = tot(3)
+      CALL stop_clock( 'rs_calibrate' )
+      !
+    END SUBROUTINE rs_calibrate
     !
     !------------------------------------------------------------------------
     FUNCTION env_real( name, default )
