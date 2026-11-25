@@ -59,6 +59,11 @@ SUBROUTINE qvan2( ngy, ih, jh, np, qmod, qg, ylmk0 )
   ! ind    : ind=1 if the results is real (l even), ind=2 if complex (l odd)
   !
   REAL(DP) :: dqi, qm, px, ux, vx, wx, uvx, pwx, work
+#if !defined(_OPENACC)
+  INTEGER, PARAMETER :: maxlm = 64
+  INTEGER :: nlm, lp_v(maxlm), l_v(maxlm), ind_v(maxlm)
+  REAL(DP) :: sig_v(maxlm), acc(2)
+#endif
   ! 1 divided dq
   ! qmod/dq
   ! measures for interpolation table
@@ -94,6 +99,50 @@ SUBROUTINE qvan2( ngy, ih, jh, np, qmod, qg, ylmk0 )
   ! ... and makes the sum over the non zero LM
   !
   dqi = 1.0_DP / dq
+#if !defined(_OPENACC)
+  !
+  ! ... CPU path: loop over G outermost (OpenMP), LM innermost. The cubic
+  ! ... interpolation weights depend only on |G| and are computed once per G
+  ! ... instead of once per (G,LM). The LM sum for each G is accumulated in
+  ! ... the same order as the original code, so results are bit-identical.
+  !
+  nlm = lpx(ivl,jvl)
+  IF ( nlm > maxlm ) CALL upf_error( 'qvan2', ' too many LM components ', nlm )
+  DO lm = 1, nlm
+     lp = lpl(ivl,jvl,lm)
+     IF ( lp < 1 .OR. lp > 49 ) CALL upf_error( 'qvan2', ' lp wrong ', MAX(lp,1) )
+     lp_v(lm) = lp
+     CALL qvan2_lsig( lp, l_v(lm), sig, ind_v(lm) )
+     sig_v(lm) = sig * ap(lp, ivl, jvl)
+  ENDDO
+  !
+!$omp parallel do default(none) &
+!$omp    shared(ngy,qmod,dqi,nlm,lp_v,l_v,ind_v,sig_v,tab_qrad,ijv,np,ylmk0,qg) &
+!$omp    private(ig,lm,qm,px,ux,vx,wx,i0,uvx,pwx,work,acc)
+  DO ig = 1, ngy
+     qm = qmod (ig) * dqi
+     px = qm - INT(qm)
+     ux = 1.0_DP - px
+     vx = 2.0_DP - px
+     wx = 3.0_DP - px
+     i0 = INT(qm) + 1
+     uvx = ux * vx * sixth
+     pwx = px * wx * 0.5_DP
+     acc(1) = 0.0_DP
+     acc(2) = 0.0_DP
+     DO lm = 1, nlm
+        work = tab_qrad(i0  ,ijv,l_v(lm),np) * uvx * wx + &
+               tab_qrad(i0+1,ijv,l_v(lm),np) * pwx * vx - &
+               tab_qrad(i0+2,ijv,l_v(lm),np) * pwx * ux + &
+               tab_qrad(i0+3,ijv,l_v(lm),np) * px * uvx
+        acc(ind_v(lm)) = acc(ind_v(lm)) + sig_v(lm) * ylmk0(ig,lp_v(lm)) * work
+     ENDDO
+     qg(1,ig) = acc(1)
+     qg(2,ig) = acc(2)
+  ENDDO
+!$omp end parallel do
+  !
+#else
   !$acc kernels
   qg = 0.0_DP
   !$acc end kernels
@@ -159,10 +208,35 @@ SUBROUTINE qvan2( ngy, ih, jh, np, qmod, qg, ylmk0 )
         !
      ENDDO
   ENDDO
+#endif
 !$acc end data
   !
   !
   RETURN
+  !
+CONTAINS
+  !
+  SUBROUTINE qvan2_lsig( lp, l, sig, ind )
+    !! Angular momentum (l+1), sign of (-i)^L and real/imag slot for combined index lp
+    INTEGER, INTENT(IN) :: lp
+    INTEGER, INTENT(OUT) :: l, ind
+    REAL(DP), INTENT(OUT) :: sig
+    IF ( lp == 1 ) THEN
+       l = 1 ; sig = 1.0_DP ; ind = 1
+    ELSEIF ( lp <=  4 ) THEN
+       l = 2 ; sig =-1.0_DP ; ind = 2
+    ELSEIF ( lp <=  9 ) THEN
+       l = 3 ; sig =-1.0_DP ; ind = 1
+    ELSEIF ( lp <= 16 ) THEN
+       l = 4 ; sig = 1.0_DP ; ind = 2
+    ELSEIF ( lp <= 25 ) THEN
+       l = 5 ; sig = 1.0_DP ; ind = 1
+    ELSEIF ( lp <= 36 ) THEN
+       l = 6 ; sig =-1.0_DP ; ind = 2
+    ELSE
+       l = 7 ; sig =-1.0_DP ; ind = 1
+    ENDIF
+  END SUBROUTINE qvan2_lsig
   !
 END SUBROUTINE qvan2
 

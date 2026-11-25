@@ -105,7 +105,11 @@ SUBROUTINE addusdens_g(rho)
   !
   CALL ylmr2( lmaxq*lmaxq, ngm_l, g(1,ngm_s), gg(ngm_s), ylmk0 )
   !
+#if defined(_OPENACC)
   !$acc parallel loop
+#else
+  !$omp parallel do
+#endif
   DO ig = 1, ngm_l
      qmod(ig) = SQRT(gg(ngm_s+ig-1))*tpiba
   ENDDO
@@ -143,7 +147,11 @@ SUBROUTINE addusdens_g(rho)
                  ENDDO
               ENDDO
               !
+#if defined(_OPENACC)
               !$acc parallel loop present(eigts1,eigts2,eigts3,mill)
+#else
+              !$omp parallel do
+#endif
               DO ig = 1, ngm_l
                  skk(ig,nb) = eigts1(mill(1,ngm_s+ig-1),na) * &
                               eigts2(mill(2,ngm_s+ig-1),na) * &
@@ -167,7 +175,11 @@ SUBROUTINE addusdens_g(rho)
               DO jh = ih, nh(nt)
                  ijh = ijh + 1
                  CALL qvan2( ngm_l, ih, jh, nt, qmod, qgm, ylmk0 )
+#if defined(_OPENACC)
                  !$acc parallel loop
+#else
+                 !$omp parallel do
+#endif
                  DO ig = 1, ngm_l
                     aux(ngm_s+ig-1,is) = aux(ngm_s+ig-1,is) + aux2(ig,ijh)*qgm(ig)
                  ENDDO

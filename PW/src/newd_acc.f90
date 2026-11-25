@@ -189,7 +189,11 @@ SUBROUTINE newq_acc(vr,deeq,skip_vltot)
   !
   CALL ylmr2( lmaxq*lmaxq, ngm_l, g(1,ngm_s), gg(ngm_s), ylmk0 )
   !
+#if defined(_OPENACC)
   !$acc parallel loop
+#else
+  !$omp parallel do
+#endif
   DO ig = 1, ngm_l
      qmod (ig) = SQRT(gg(ngm_s+ig-1))*tpiba
   ENDDO
@@ -244,6 +248,7 @@ SUBROUTINE newq_acc(vr,deeq,skip_vltot)
         ! ... Compute and store V(G) times the structure factor e^(-iG*tau)
         !
         DO is = 1, nspin_mag
+#if defined(_OPENACC)
            !$acc parallel loop collapse(2)
            DO na = 1, nat
               DO ig = 1, ngm_l
@@ -255,6 +260,20 @@ SUBROUTINE newq_acc(vr,deeq,skip_vltot)
                       eigts3(mill(3,ngm_s+ig-1),na) )
               END DO
            END DO
+#else
+           DO na = 1, nat
+              nb = na_to_nab(na)
+              IF (nb <= 0) CYCLE
+              !$omp parallel do
+              DO ig = 1, ngm_l
+                 aux(ig,nb) = vaux(ig,is) * CONJG ( &
+                   eigts1(mill(1,ngm_s+ig-1),na) * &
+                   eigts2(mill(2,ngm_s+ig-1),na) * &
+                   eigts3(mill(3,ngm_s+ig-1),na) )
+              END DO
+              !$omp end parallel do
+           END DO
+#endif
            !
            ! ... here we compute the integral Q*V for all atoms of this kind
            !
