@@ -474,7 +474,7 @@ SUBROUTINE electrons_scf ( printout, exxen )
                                    oscdft_print_ns
 #endif
   !
-  USE realus,               ONLY : rs_coarse_check
+  USE realus,               ONLY : rs_coarse_check, rs_coarse
   !
   IMPLICIT NONE
   !
@@ -820,6 +820,13 @@ SUBROUTINE electrons_scf ( printout, exxen )
         CALL mp_bcast( conv_elec, root_pool, inter_pool_comm )
         !
         IF (.NOT. scf_must_converge .AND. idum == niter) conv_elec = .TRUE.
+        !
+        ! ... never finish on the coarse FFT grid: switch to the smooth grid and go on
+        !
+        IF ( conv_elec .AND. rs_coarse .AND. idum < niter ) THEN
+           CALL rs_coarse_check( dr2, nelec, force=.TRUE. )
+           conv_elec = .FALSE.
+        ENDIF
         !
         ! ... if convergence is achieved or if the self-consistency error
         ! ... (dr2) is smaller than the estimated error due to diagonalization

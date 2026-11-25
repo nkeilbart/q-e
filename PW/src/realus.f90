@@ -3404,7 +3404,7 @@ MODULE realus
   END SUBROUTINE vloc_psi_k_coarse
   !
   !--------------------------------------------------------------------------
-  SUBROUTINE rs_coarse_check( dr2, nelec )
+  SUBROUTINE rs_coarse_check( dr2, nelec, force )
     !--------------------------------------------------------------------------
     !! The coarse grid is used only while the SCF error is large: when the
     !! estimated SCF accuracy dr2 falls below QE_RS_COARSE_TR2 (default 1e-6 Ry)
@@ -3414,9 +3414,13 @@ MODULE realus
     !
     IMPLICIT NONE
     REAL(DP), INTENT(IN) :: dr2, nelec
+    LOGICAL, INTENT(IN), OPTIONAL :: force
+    !! .true.: switch now (the scf loop was about to stop on the coarse grid)
+    LOGICAL :: force_
     !
     IF ( .NOT. rs_coarse ) RETURN
-    IF ( dr2 >= env_real( 'QE_RS_COARSE_TR2', 1.0D-6 ) * MAX( 1.0_DP, nelec ) ) RETURN
+    force_ = .FALSE. ; IF ( PRESENT(force) ) force_ = force
+    IF ( .NOT. force_ .AND. dr2 >= env_real( 'QE_RS_COARSE_TR2', 1.0D-6 ) * MAX( 1.0_DP, nelec ) ) RETURN
     rs_coarse = .FALSE.
     IF ( ALLOCATED( boxrad_beta ) ) DEALLOCATE( boxrad_beta )
     IF ( ALLOCATED( vrs_c ) ) DEALLOCATE( vrs_c )
