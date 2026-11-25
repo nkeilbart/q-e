@@ -349,7 +349,8 @@ SUBROUTINE control_iosys()
   USE Coul_cut_2D,  ONLY :  do_cutoff_2D 
 
   USE realus,                ONLY : real_space_ => real_space, rs_gridfac, rs_coarse_thr, &
-                                    rs_proj_space, rs_proj_margin
+                                    rs_proj_space, rs_proj_margin, &
+                                    rs_beta_tol, rs_q_tol
 
   USE qmmm,                  ONLY : qmmm_config
   !
@@ -397,6 +398,7 @@ SUBROUTINE control_iosys()
                                tqr, tq_smoothing, tbeta_smoothing,         &
                                fft_coarse_factor, fft_coarse_thr,          &
                                projector_space, projector_margin,          &
+                               projector_filter_tol, augmentation_filter_tol, &
                                diago_thr_init,                             &
                                diago_cg_maxiter,                           &
                                diago_david_ndim, diago_rmm_ndim,           &
@@ -1284,6 +1286,10 @@ SUBROUTINE control_iosys()
   IF ( projector_margin < 0.0_DP .OR. projector_margin >= 1.0_DP ) &
      CALL errore( 'iosys', 'projector_margin must be in [0,1)', 1 )
   rs_proj_margin = projector_margin
+  IF ( projector_filter_tol <= 0.0_DP .OR. augmentation_filter_tol <= 0.0_DP ) &
+     CALL errore( 'iosys', 'projector_filter_tol and augmentation_filter_tol must be positive', 1 )
+  rs_beta_tol = projector_filter_tol
+  rs_q_tol    = augmentation_filter_tol
   tbeta_smoothing_ = tbeta_smoothing
   !
   ! SYMMETRY

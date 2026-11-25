@@ -64,6 +64,10 @@ MODULE realus
   !! input projector_space: 'auto', 'real' or 'reciprocal'
   REAL(DP) :: rs_proj_margin = 0.2_DP
   !! input projector_margin
+  REAL(DP) :: rs_beta_tol = 3.0D-6
+  !! input projector_filter_tol: filter tolerance that sets the projector spheres
+  REAL(DP) :: rs_q_tol = 1.0D-5
+  !! input augmentation_filter_tol: same, for the augmentation spheres
   REAL(DP) :: rs_gridfac = 1.5_DP
   !! input fft_coarse_factor (env QE_RS_GRIDFAC overrides it, for tests)
   REAL(DP) :: rs_coarse_thr = 1.0D-4
@@ -147,6 +151,7 @@ MODULE realus
   PUBLIC :: rs_becp_push, rs_becp_flush, rs_becp_ready, rs_free_vkb
   PUBLIC :: rs_coarse, rs_update_vc, rs_coarse_check, rs_coarse_setup, vloc_psi_k_coarse
   PUBLIC :: rs_gridfac, rs_coarse_thr, rs_proj_space, rs_proj_margin
+  PUBLIC :: rs_beta_tol, rs_q_tol
   !
   CONTAINS
   
@@ -377,7 +382,7 @@ MODULE realus
                WRITE( envname, '("QE_RQ_RFAC_",I0)' ) nt
                CALL filter_species( 'Q', nt, nfun, lfun, boxrad(nt)*alat, &
                     boxrad(nt)*alat*env_real( TRIM(envname), rfacq ), &
-                    env_real( 'QE_RQ_TOL', 1.0D-5 ), qpassq, qstopq, wstopq, nqfine, rsel, qtmp )
+                    rs_q_tol, qpassq, qstopq, wstopq, nqfine, rsel, qtmp )
                boxrad(nt) = rsel / alat
                DO i = 1, nfun
                   qftab(:,lfun(3,i),lfun(2,i),nt) = qtmp(:,i)
@@ -1263,7 +1268,6 @@ MODULE realus
       !! filter is on (default), the radial tables of the filtered projectors.
       !! Done once. Controls (environment variables, prototype):
       !!  QE_RS_FILTER=0  raw spline of beta(r) instead of filtered projectors
-      !!  QE_RS_TOL       filter tolerance used to choose the sphere radius
       !!  QE_RS_RFAC[_n]  fix the radius to RFAC * (radius of raw beta) [species n]
       !!  QE_RS_QPASS     pass band: chi(q)=beta(q) for q <= QPASS*sqrt(ecutwfc)
       !!  QE_RS_QSTOP     stop band: chi(q)->0 for q >= QSTOP*sqrt(ecutwfc)
@@ -1317,7 +1321,7 @@ MODULE realus
       !
       IF ( lbfilter ) THEN
          ! ... sphere radius: chosen automatically so that the filter error is
-         ! ... below QE_RS_TOL, unless QE_RS_RFAC or QE_RS_RFAC_<it> fixes it
+         ! ... below projector_filter_tol, unless QE_RS_RFAC or QE_RS_RFAC_<it> fixes it
          nbt = MAXVAL( upf(1:nsp)%nbeta )
          IF ( ALLOCATED(bftab) ) DEALLOCATE( bftab )
          ALLOCATE( bftab(nbfine,nbt,nsp) )
@@ -1333,7 +1337,7 @@ MODULE realus
             ENDDO
             CALL filter_species( 'beta', it, upf(it)%nbeta, lfun, boxrad_beta(it)*alat, &
                  boxrad_beta(it)*alat*env_real( TRIM(envname), rfac ), &
-                 env_real( 'QE_RS_TOL', 3.0D-6 ), qpass, qstop, wstop, nbfine, rsel, bftab(1,1,it) )
+                 rs_beta_tol, qpass, qstop, wstop, nbfine, rsel, bftab(1,1,it) )
             boxrad_beta(it) = rsel / alat
             DEALLOCATE( lfun )
          ENDDO

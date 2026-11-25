@@ -1045,6 +1045,14 @@ MODULE input_parameters
           !! with projector_space='auto', real-space projectors are used only if their
           !! estimated cost is lower than the G-space cost by at least this fraction
 
+        REAL(DP) :: projector_filter_tol = 3.0E-6_DP
+          !! tolerance of the filtered real-space projectors: the sphere of each
+          !! species is the smallest one for which every filtered beta function
+          !! meets it
+
+        REAL(DP) :: augmentation_filter_tol = 1.0E-5_DP
+          !! same, for the filtered real-space augmentation functions Q(r)
+
         REAL(DP) :: fft_coarse_factor = 1.5_DP
           !! the first scf iterations apply V_loc (and real-space projectors) on a
           !! coarser FFT grid holding the G sphere of radius fft_coarse_factor*sqrt(gkcut);
@@ -1100,6 +1108,7 @@ MODULE input_parameters
           tqr, tq_smoothing, tbeta_smoothing,                          &
           fft_coarse_factor, fft_coarse_thr,                           &
           projector_space, projector_margin,                           &
+          projector_filter_tol, augmentation_filter_tol,               &
           diago_cg_maxiter, diago_david_ndim, diago_rmm_ndim,          &
           diago_rmm_conv, diago_gs_nblock, diagonalization,            &
           startingpot, startingwfc , conv_thr,                         &

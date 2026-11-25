@@ -2822,6 +2822,29 @@ input_description -distribution {Quantum ESPRESSO} -package PWscf -program pw.x 
         }
     }
 
+    var projector_filter_tol -type REAL {
+        default { 3.D-6 }
+        info {
+            Accuracy of the filtered real-space projectors (see @ref projector_space).
+            Each projector is replaced by a function confined to a sphere and fitted
+            so that it reproduces the original for the plane waves of the
+            wavefunctions without aliasing on the FFT grid; for each species the
+            smallest sphere whose fit error is below this value is used. Smaller
+            values give larger spheres (slower, more accurate). The total-energy
+            error per atom is roughly 0.1-0.3 times this value.
+        }
+    }
+
+    var augmentation_filter_tol -type REAL {
+        default { 1.D-5 }
+        info {
+            Same as @ref projector_filter_tol, for the filtered real-space
+            augmentation functions Q(r). Smaller values give larger spheres (more
+            memory, more accurate). Forces are the most sensitive quantity: their
+            error can reach about 0.85 times this value (in Ry/bohr).
+        }
+    }
+
     var fft_coarse_factor -type REAL {
         default { 1.5 }
         info {
