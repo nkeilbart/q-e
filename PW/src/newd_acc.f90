@@ -184,19 +184,22 @@ SUBROUTINE newq_acc(vr,deeq,skip_vltot)
   IF ( ngm_l < 1 ) CALL errore('newq_acc','no G-vectors?!?',1)
   !
   ALLOCATE(na_to_nab(nat))
+#if defined(_OPENACC)
   ALLOCATE( vaux(ngm_l,nspin_mag), qmod(ngm_l), ylmk0( ngm_l, lmaxq*lmaxq ) )
+#else
+  ! ... CPU: qmod and ylmk0 are computed per G block in newq_blocked
+  ALLOCATE( vaux(ngm_l,nspin_mag), qmod(1), ylmk0(1,1) )
+#endif
   !$acc data create( na_to_nab, vaux, qmod, ylmk0 )
   !
+#if defined(_OPENACC)
   CALL ylmr2( lmaxq*lmaxq, ngm_l, g(1,ngm_s), gg(ngm_s), ylmk0 )
   !
-#if defined(_OPENACC)
   !$acc parallel loop
-#else
-  !$omp parallel do
-#endif
   DO ig = 1, ngm_l
      qmod (ig) = SQRT(gg(ngm_s+ig-1))*tpiba
   ENDDO
+#endif
   ! ... Fourier transform of the total effective potential
   !
   DO is = 1, nspin_mag
@@ -207,6 +210,10 @@ SUBROUTINE newq_acc(vr,deeq,skip_vltot)
      END IF
   END DO
   !
+#if !defined(_OPENACC)
+  ! ... CPU: G-blocked algorithm, no ngm-sized Q(G) or V(G)S(G) arrays
+  CALL newq_blocked( ngm_s, ngm_l, vaux, fact, deeq )
+#else
   DO nt = 1, ntyp
      !
      IF ( upf(nt)%tvanp ) THEN
@@ -248,7 +255,6 @@ SUBROUTINE newq_acc(vr,deeq,skip_vltot)
         ! ... Compute and store V(G) times the structure factor e^(-iG*tau)
         !
         DO is = 1, nspin_mag
-#if defined(_OPENACC)
            !$acc parallel loop collapse(2)
            DO na = 1, nat
               DO ig = 1, ngm_l
@@ -260,20 +266,6 @@ SUBROUTINE newq_acc(vr,deeq,skip_vltot)
                       eigts3(mill(3,ngm_s+ig-1),na) )
               END DO
            END DO
-#else
-           DO na = 1, nat
-              nb = na_to_nab(na)
-              IF (nb <= 0) CYCLE
-              !$omp parallel do
-              DO ig = 1, ngm_l
-                 aux(ig,nb) = vaux(ig,is) * CONJG ( &
-                   eigts1(mill(1,ngm_s+ig-1),na) * &
-                   eigts2(mill(2,ngm_s+ig-1),na) * &
-                   eigts3(mill(3,ngm_s+ig-1),na) )
-              END DO
-              !$omp end parallel do
-           END DO
-#endif
            !
            ! ... here we compute the integral Q*V for all atoms of this kind
            !
@@ -308,6 +300,7 @@ SUBROUTINE newq_acc(vr,deeq,skip_vltot)
      END IF
      !
   END DO
+#endif
   !
   !$acc host_data use_device(deeq)
   CALL mp_sum( deeq( :, :, :, 1:nspin_mag ), inter_pool_comm )
@@ -318,6 +311,152 @@ SUBROUTINE newq_acc(vr,deeq,skip_vltot)
   DEALLOCATE(na_to_nab)
   !
 END SUBROUTINE newq_acc
+!
+#if !defined(_OPENACC)
+!----------------------------------------------------------------------
+SUBROUTINE newq_blocked( ngm_s, ngm_l, vaux, fact, deeq )
+  !----------------------------------------------------------------------
+  !! CPU version of the integral \(\int V_{eff}(r) Q_{ij}(r-\tau_a) dr\),
+  !! computed in G space on blocks of \(\text{gblk}\) G-vectors owned by one
+  !! OpenMP thread each. Per block and species: spherical harmonics, |G|,
+  !! \(Q_{ij}(G)\) (qvan2, once for all spin components), \(V(G)S^*_a(G)\)
+  !! and a DGEMM accumulating \(\sum_G Q^*_{ij}(G) V(G) S^*_a(G)\) into a
+  !! per-thread partial sum. Partial sums are added in thread order, so the
+  !! result is deterministic for a given number of threads.
+  !
+  !! Compared with the original algorithm this removes the work arrays
+  !! qgm(ngm_l,nij), aux(ngm_l,nat) and ylmk0(ngm_l,lmaxq^2); extra memory is
+  !! O(gblk*(nij+nat+lmaxq^2)) per thread plus nij*nat*nspin per thread for
+  !! the partial sums. Results differ from the original only by the order of
+  !! the floating-point summation over G (rounding level).
+  !
+  USE kinds,                ONLY : DP
+  USE ions_base,            ONLY : nat, ntyp => nsp, ityp
+  USE cell_base,            ONLY : omega, tpiba
+  USE gvect,                ONLY : g, gg, gstart, mill, eigts1, eigts2, eigts3
+  USE lsda_mod,             ONLY : nspin
+  USE uspp_param,           ONLY : upf, lmaxq, nh, nhm
+  USE control_flags,        ONLY : gamma_only
+  USE noncollin_module,     ONLY : nspin_mag
+!$ USE omp_lib,             ONLY : omp_get_max_threads, omp_get_thread_num
+  !
+  IMPLICIT NONE
+  !
+  INTEGER,     INTENT(IN)    :: ngm_s, ngm_l
+  !! global index of the first local G-vector, number of local G-vectors
+  COMPLEX(DP), INTENT(IN)    :: vaux(ngm_l,nspin_mag)
+  !! V_eff(G) on the local G-vectors
+  REAL(DP),    INTENT(IN)    :: fact
+  !! 2 with gamma tricks, 1 otherwise
+  REAL(DP),    INTENT(INOUT) :: deeq(nhm,nhm,nat,nspin)
+  !! output (must be zeroed by the caller)
+  !
+  INTEGER, PARAMETER :: gblk = 512
+  !
+  INTEGER :: nt, na, nb, nab, nij, ig0, n, ig, igg, ih, jh, ijh, is, nth, ith, it
+  INTEGER,     ALLOCATABLE :: atoms(:)
+  REAL(DP),    ALLOCATABLE :: deeaux(:,:,:,:), qmod(:), ylm(:)
+  COMPLEX(DP), ALLOCATABLE :: qgm(:,:), aux(:,:)
+  !
+  nth = 1
+!$ nth = omp_get_max_threads()
+  !
+  DO nt = 1, ntyp
+     !
+     IF ( .NOT. upf(nt)%tvanp ) CYCLE
+     nab = COUNT( ityp(1:nat) == nt )
+     IF ( nab == 0 ) CYCLE
+     nij = nh(nt)*(nh(nt)+1)/2
+     !
+     ALLOCATE( atoms(nab) )
+     nb = 0
+     DO na = 1, nat
+        IF ( ityp(na) == nt ) THEN
+           nb = nb + 1
+           atoms(nb) = na
+        ENDIF
+     ENDDO
+     ALLOCATE( deeaux(nij,nab,nspin_mag,0:nth-1) )
+     deeaux(:,:,:,:) = 0.0_DP
+     !
+     !$omp parallel default(shared) &
+     !$omp   private(ith,ig0,n,igg,ig,nb,na,is,ih,jh,ijh,qgm,aux,qmod,ylm)
+     ith = 0
+!$   ith = omp_get_thread_num()
+     ALLOCATE( qgm(gblk,nij), aux(gblk,nab), qmod(gblk) )
+     ! ... ylm is 1D: passed (sequence association) as ylm(n,lmaxq**2)
+     ALLOCATE( ylm(gblk*lmaxq*lmaxq) )
+     !
+     !$omp do schedule(static)
+     DO ig0 = 1, ngm_l, gblk
+        !
+        n   = MIN( gblk, ngm_l - ig0 + 1 )
+        igg = ngm_s + ig0 - 1           ! global index of the first G of the block
+        !
+        ! ... Q_ij(G) for this block (no structure factor)
+        CALL ylmr2( lmaxq*lmaxq, n, g(1,igg), gg(igg), ylm )
+        DO ig = 1, n
+           qmod(ig) = SQRT( gg(igg+ig-1) ) * tpiba
+        ENDDO
+        ijh = 0
+        DO ih = 1, nh(nt)
+           DO jh = ih, nh(nt)
+              ijh = ijh + 1
+              CALL qvan2( n, ih, jh, nt, qmod, qgm(1,ijh), ylm )
+           ENDDO
+        ENDDO
+        !
+        DO is = 1, nspin_mag
+           ! ... V(G) times the structure factor e^(-iG*tau)
+           DO nb = 1, nab
+              na = atoms(nb)
+              DO ig = 1, n
+                 aux(ig,nb) = vaux(ig0+ig-1,is) * CONJG( &
+                              eigts1(mill(1,igg+ig-1),na) * &
+                              eigts2(mill(2,igg+ig-1),na) * &
+                              eigts3(mill(3,igg+ig-1),na) )
+              ENDDO
+           ENDDO
+           ! ... partial integral Q*V over this block, for all atoms of this kind
+           CALL DGEMM( 'C', 'N', nij, nab, 2*n, fact, qgm, 2*gblk, aux, 2*gblk, &
+                       1.0_DP, deeaux(1,1,is,ith), nij )
+           ! ... G=0 is counted once with gamma tricks (as in newq_acc)
+           IF ( gamma_only .AND. gstart == 2 .AND. ig0 == 1 ) &
+              CALL DGER( nij, nab, -1.0_DP, qgm, 2*gblk, aux, 2*gblk, &
+                         deeaux(1,1,is,ith), nij )
+        ENDDO
+        !
+     ENDDO
+     !$omp end do
+     !
+     DEALLOCATE( qgm, aux, qmod, ylm )
+     !$omp end parallel
+     !
+     ! ... deterministic reduction of the per-thread partial sums
+     DO it = 1, nth-1
+        deeaux(:,:,:,0) = deeaux(:,:,:,0) + deeaux(:,:,:,it)
+     ENDDO
+     !
+     DO is = 1, nspin_mag
+        DO nb = 1, nab
+           na = atoms(nb)
+           ijh = 0
+           DO ih = 1, nh(nt)
+              DO jh = ih, nh(nt)
+                 ijh = ijh + 1
+                 deeq(ih,jh,na,is) = omega * deeaux(ijh,nb,is,0)
+                 deeq(jh,ih,na,is) = deeq(ih,jh,na,is)
+              ENDDO
+           ENDDO
+        ENDDO
+     ENDDO
+     !
+     DEALLOCATE( deeaux, atoms )
+     !
+  ENDDO
+  !
+END SUBROUTINE newq_blocked
+#endif
   !
 !----------------------------------------------------------------------------
 SUBROUTINE newd_us( ) 

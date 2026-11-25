@@ -22,6 +22,7 @@ SUBROUTINE qvan2( ngy, ih, jh, np, qmod, qg, ylmk0 )
   USE qrad_mod,    ONLY: dq, tab_qrad
   USE uspp_param,  ONLY: lmaxq, nbetam
   USE uspp,        ONLY: nlx, lpl, lpx, ap, indv, nhtolm
+!$ USE omp_lib,    ONLY: omp_in_parallel, omp_get_num_threads, omp_get_thread_num
   !
   IMPLICIT NONE
   !
@@ -62,7 +63,9 @@ SUBROUTINE qvan2( ngy, ih, jh, np, qmod, qg, ylmk0 )
 #if !defined(_OPENACC)
   INTEGER, PARAMETER :: maxlm = 64
   INTEGER :: nlm, lp_v(maxlm), l_v(maxlm), ind_v(maxlm)
-  REAL(DP) :: sig_v(maxlm), acc(2)
+  INTEGER :: nth, ith, chunk, ig1, ig2
+  REAL(DP) :: sig_v(maxlm)
+  LOGICAL :: use_omp
 #endif
   ! 1 divided dq
   ! qmod/dq
@@ -116,31 +119,27 @@ SUBROUTINE qvan2( ngy, ih, jh, np, qmod, qg, ylmk0 )
      sig_v(lm) = sig * ap(lp, ivl, jvl)
   ENDDO
   !
-!$omp parallel do default(none) &
-!$omp    shared(ngy,qmod,dqi,nlm,lp_v,l_v,ind_v,sig_v,tab_qrad,ijv,np,ylmk0,qg) &
-!$omp    private(ig,lm,qm,px,ux,vx,wx,i0,uvx,pwx,work,acc)
-  DO ig = 1, ngy
-     qm = qmod (ig) * dqi
-     px = qm - INT(qm)
-     ux = 1.0_DP - px
-     vx = 2.0_DP - px
-     wx = 3.0_DP - px
-     i0 = INT(qm) + 1
-     uvx = ux * vx * sixth
-     pwx = px * wx * 0.5_DP
-     acc(1) = 0.0_DP
-     acc(2) = 0.0_DP
-     DO lm = 1, nlm
-        work = tab_qrad(i0  ,ijv,l_v(lm),np) * uvx * wx + &
-               tab_qrad(i0+1,ijv,l_v(lm),np) * pwx * vx - &
-               tab_qrad(i0+2,ijv,l_v(lm),np) * pwx * ux + &
-               tab_qrad(i0+3,ijv,l_v(lm),np) * px * uvx
-        acc(ind_v(lm)) = acc(ind_v(lm)) + sig_v(lm) * ylmk0(ig,lp_v(lm)) * work
-     ENDDO
-     qg(1,ig) = acc(1)
-     qg(2,ig) = acc(2)
-  ENDDO
-!$omp end parallel do
+  ! ... Threads are spawned only for large G sets and only when not already
+  ! ... inside a parallel region: blocked callers (addusdens, newq) call
+  ! ... qvan2 from within their own OpenMP region on small G blocks, where a
+  ! ... nested (or even an inactive) parallel region per call would cost more
+  ! ... than the work itself.
+  !
+  use_omp = .FALSE.
+!$ use_omp = ( ngy >= 2048 ) .AND. ( .NOT. omp_in_parallel() )
+  IF ( use_omp ) THEN
+!$omp parallel private(nth,ith,chunk,ig1,ig2)
+     nth = 1 ; ith = 0
+!$   nth = omp_get_num_threads()
+!$   ith = omp_get_thread_num()
+     chunk = ( ngy + nth - 1 ) / nth
+     ig1 = ith*chunk + 1
+     ig2 = MIN( ngy, ig1 + chunk - 1 )
+     IF ( ig1 <= ig2 ) CALL qvan2_kernel( ig1, ig2 )
+!$omp end parallel
+  ELSE
+     CALL qvan2_kernel( 1, ngy )
+  ENDIF
   !
 #else
   !$acc kernels
@@ -215,6 +214,38 @@ SUBROUTINE qvan2( ngy, ih, jh, np, qmod, qg, ylmk0 )
   RETURN
   !
 CONTAINS
+  !
+#if !defined(_OPENACC)
+  SUBROUTINE qvan2_kernel( ig1, ig2 )
+    !! Q_ij(G) for G-vectors ig1..ig2: G outer, LM inner. The cubic
+    !! interpolation weights depend only on |G| and are computed once per G.
+    !! The LM sum per G is accumulated in the original order (bit-identical).
+    INTEGER, INTENT(IN) :: ig1, ig2
+    INTEGER  :: ig, lm, i0
+    REAL(DP) :: qm, px, ux, vx, wx, uvx, pwx, work, acc(2)
+    DO ig = ig1, ig2
+       qm = qmod (ig) * dqi
+       px = qm - INT(qm)
+       ux = 1.0_DP - px
+       vx = 2.0_DP - px
+       wx = 3.0_DP - px
+       i0 = INT(qm) + 1
+       uvx = ux * vx * sixth
+       pwx = px * wx * 0.5_DP
+       acc(1) = 0.0_DP
+       acc(2) = 0.0_DP
+       DO lm = 1, nlm
+          work = tab_qrad(i0  ,ijv,l_v(lm),np) * uvx * wx + &
+                 tab_qrad(i0+1,ijv,l_v(lm),np) * pwx * vx - &
+                 tab_qrad(i0+2,ijv,l_v(lm),np) * pwx * ux + &
+                 tab_qrad(i0+3,ijv,l_v(lm),np) * px * uvx
+          acc(ind_v(lm)) = acc(ind_v(lm)) + sig_v(lm) * ylmk0(ig,lp_v(lm)) * work
+       ENDDO
+       qg(1,ig) = acc(1)
+       qg(2,ig) = acc(2)
+    ENDDO
+  END SUBROUTINE qvan2_kernel
+#endif
   !
   SUBROUTINE qvan2_lsig( lp, l, sig, ind )
     !! Angular momentum (l+1), sign of (-i)^L and real/imag slot for combined index lp
