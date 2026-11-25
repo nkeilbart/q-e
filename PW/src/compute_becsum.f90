@@ -121,7 +121,8 @@ SUBROUTINE sum_bec ( ik, current_spin, ibnd_start, ibnd_end, this_bgrp_nbnd )
   USE wavefunctions,      ONLY : evc
   USE realus,             ONLY : real_space, &
                                  invfft_orbital_gamma, calbec_rs_gamma, &
-                                 invfft_orbital_k, calbec_rs_k
+                                 invfft_orbital_k, calbec_rs_k, &
+                                 rs_block, calbec_rs_k_block
   USE us_exx,             ONLY : store_becxx0
   USE mp_bands,           ONLY : nbgrp,inter_bgrp_comm
   USE mp,                 ONLY : mp_sum
@@ -158,11 +159,15 @@ SUBROUTINE sum_bec ( ik, current_spin, ibnd_start, ibnd_end, this_bgrp_nbnd )
      else
         current_k = ik
         becp%k = (0.d0,0.d0)
+        if ( rs_block > 1 ) then
+           call calbec_rs_k_block( evc, ibnd_start, this_bgrp_nbnd )
+        else
         do kbnd = 1, this_bgrp_nbnd
            ibnd = ibnd_start + kbnd -1
            call invfft_orbital_k(evc,ibnd,ibnd_end)
            call calbec_rs_k(kbnd,this_bgrp_nbnd)
         enddo
+        endif
         !call mp_sum(becp%k,inter_bgrp_comm)
         !$acc update device(becp%k)
      endif

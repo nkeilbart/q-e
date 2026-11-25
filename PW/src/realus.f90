@@ -52,6 +52,9 @@ MODULE realus
   ! ... General
   !
   LOGICAL :: real_space = .FALSE.
+  INTEGER :: rs_block = 1
+  !! (prototype, env QE_RS_BLOCK) >1: k-point real-space projectors are applied
+  !! to rs_block bands at a time (h_psi_rs_k_block, s_psi_rs_k_block)
   !! if true perform calculations in real space
   INTEGER :: initialisation_level
   !! init_realspace_vars sets this to 3; qpointlist adds 5; betapointlist adds 7
@@ -103,6 +106,7 @@ MODULE realus
   PUBLIC :: invfft_orbital_gamma, fwfft_orbital_gamma, s_psir_gamma, &
             calbec_rs_gamma, add_vuspsir_gamma, invfft_orbital_k,    &
             fwfft_orbital_k, s_psir_k, calbec_rs_k, add_vuspsir_k
+  PUBLIC :: rs_block, h_psi_rs_k_block, s_psi_rs_k_block, calbec_rs_k_block
   !
   CONTAINS
   
@@ -854,6 +858,8 @@ MODULE realus
       ! ...  QE_RS_WSTOP     weight of the stop band in the least-squares fit
       lfilter = ( NINT( env_real( 'QE_RS_FILTER', 0.0_DP ) ) == 1 )
       rfac  = env_real( 'QE_RS_RFAC', 1.0_DP )
+      rs_block = MAX( 1, NINT( env_real( 'QE_RS_BLOCK', 1.0_DP ) ) )
+      WRITE( stdout, '(5X,"RS projectors: band block = ",I4)' ) rs_block
       qpass = env_real( 'QE_RS_QPASS', 1.0_DP ) * SQRT(ecutwfc)
       gnyq  = tpiba * 0.5_DP * MIN( dffts%nr1*SQRT(SUM(bg(:,1)**2)), &
                                     dffts%nr2*SQRT(SUM(bg(:,2)**2)), &
@@ -2909,6 +2915,233 @@ MODULE realus
     ENDIF
   CALL stop_clock( 'v_loc_psir' )
   END SUBROUTINE v_loc_psir_inplace
+
+  !--------------------------------------------------------------------------
+  SUBROUTINE h_psi_rs_k_block( m, psi, hpsi )
     !--------------------------------------------------------------------------
+    !! Blocked version of the k-point real-space loop of h_psi_ (CPU):
+    !! V_loc|psi> + V_NL|psi> for m bands, rs_block bands at a time.
+    !! For each block: all bands are brought to real space, <beta|psi> is
+    !! computed for the whole block with one DGEMM per atom and ONE mp_sum,
+    !! V_NL is applied with one DGEMM per atom, then each band goes back to
+    !! G space. Needs rs_block copies of the smooth-grid wavefunction.
+    !
+    USE wavefunctions,  ONLY : psic
+    USE scf,            ONLY : vrs
+    USE lsda_mod,       ONLY : current_spin
+    USE wvfct,          ONLY : current_k
+    USE cell_base,      ONLY : omega
+    USE ions_base,      ONLY : nat, ityp
+    USE uspp_param,     ONLY : nh, nhm
+    USE uspp,           ONLY : deeq, ofsbeta
+    USE becmod,         ONLY : becp
+    USE fft_base,       ONLY : dffts
+    USE mp_bands,       ONLY : intra_bgrp_comm
+    USE mp,             ONLY : mp_sum
+    !
+    IMPLICIT NONE
+    !
+    INTEGER, INTENT(IN) :: m
+    COMPLEX(DP), INTENT(IN)    :: psi(:,:)
+    COMPLEX(DP), INTENT(INOUT) :: hpsi(:,:)
+    !
+    INTEGER :: nb, b0, ib, i, ir, ia, ih, nhn, mbia, nnr
+    REAL(DP) :: facb, faca
+    COMPLEX(DP) :: z
+    COMPLEX(DP), ALLOCATABLE :: psib(:,:)
+    REAL(DP), ALLOCATABLE :: wblk(:,:), outb(:,:), bec2(:,:), w2(:,:)
+    !
+    IF ( dffts%has_task_groups ) CALL errore( 'h_psi_rs_k_block', 'task_groups not implemented', 1 )
+    nb  = MIN( rs_block, m )
+    nnr = dffts%nnr
+    ALLOCATE( psib(nnr,nb), wblk(MAX(boxtot,1),2*nb), outb(MAX(boxtot,1),2*nb), bec2(nhm,2*nb), w2(nhm,2*nb) )
+    CALL set_xkphase( current_k )
+    facb = SQRT(omega) / (dffts%nr1*dffts%nr2*dffts%nr3)
+    faca = SQRT(omega)
+    !
+    DO b0 = 1, m, nb
+       ib = MIN( nb, m-b0+1 )
+       DO i = 1, ib
+          CALL invfft_orbital_k( psi, b0+i-1, m )
+          DO ir = 1, boxtot
+             z = psic( box_beta(ir) ) * CONJG( xkphase(ir) )
+             wblk(ir,2*i-1) = DBLE(z) ; wblk(ir,2*i) = AIMAG(z)
+          ENDDO
+          CALL start_clock( 'v_loc_psir' )
+          psib(1:nnr,i) = vrs(1:nnr,current_spin) * psic(1:nnr)
+          CALL stop_clock( 'v_loc_psir' )
+       ENDDO
+       !
+       CALL start_clock( 'calbec_rs' )
+       becp%k(:,b0:b0+ib-1) = (0.0_DP,0.0_DP)
+       DO ia = 1, nat
+          mbia = maxbox_beta(ia) ; nhn = nh(ityp(ia))
+          IF ( mbia == 0 .OR. nhn == 0 ) CYCLE
+          CALL DGEMM( 'T', 'N', nhn, 2*ib, mbia, facb, betasave(box_s(ia),1), SIZE(betasave,1), &
+                      wblk(box_s(ia),1), SIZE(wblk,1), 0.0_DP, bec2, nhm )
+          DO i = 1, ib
+             DO ih = 1, nhn
+                becp%k(ofsbeta(ia)+ih,b0+i-1) = CMPLX( bec2(ih,2*i-1), bec2(ih,2*i), KIND=DP )
+             ENDDO
+          ENDDO
+       ENDDO
+       CALL mp_sum( becp%k(:,b0:b0+ib-1), intra_bgrp_comm )
+       CALL stop_clock( 'calbec_rs' )
+       !
+       CALL start_clock( 'add_vuspsir' )
+       DO ia = 1, nat
+          mbia = maxbox_beta(ia) ; nhn = nh(ityp(ia))
+          IF ( mbia == 0 .OR. nhn == 0 ) CYCLE
+          DO i = 1, ib
+             DO ih = 1, nhn
+                bec2(ih,2*i-1) = DBLE ( becp%k(ofsbeta(ia)+ih,b0+i-1) )
+                bec2(ih,2*i)   = AIMAG( becp%k(ofsbeta(ia)+ih,b0+i-1) )
+             ENDDO
+          ENDDO
+          CALL DGEMM( 'N', 'N', nhn, 2*ib, nhn, faca, deeq(1,1,ia,current_spin), SIZE(deeq,1), &
+                      bec2, nhm, 0.0_DP, w2, nhm )
+          CALL DGEMM( 'N', 'N', mbia, 2*ib, nhn, 1.0_DP, betasave(box_s(ia),1), SIZE(betasave,1), &
+                      w2, nhm, 0.0_DP, outb(box_s(ia),1), SIZE(outb,1) )
+       ENDDO
+       CALL stop_clock( 'add_vuspsir' )
+       !
+       DO i = 1, ib
+          psic(1:nnr) = psib(1:nnr,i)
+          DO ir = 1, boxtot
+             psic( box_beta(ir) ) = psic( box_beta(ir) ) + &
+                  xkphase(ir) * CMPLX( outb(ir,2*i-1), outb(ir,2*i), KIND=DP )
+          ENDDO
+          CALL fwfft_orbital_k( hpsi, b0+i-1, m, add_to_orbital=.TRUE. )
+       ENDDO
+    ENDDO
+    !
+    DEALLOCATE( psib, wblk, outb, bec2, w2 )
+    !
+  END SUBROUTINE h_psi_rs_k_block
+  !
+  !--------------------------------------------------------------------------
+  SUBROUTINE calbec_rs_k_block( psi, ibnd_start, n )
+    !--------------------------------------------------------------------------
+    !! becp%k(:,1:n) = <beta|psi(:,ibnd_start:ibnd_start+n-1)> with real-space
+    !! projectors, rs_block bands at a time (one DGEMM per atom and one
+    !! mp_sum per block instead of one mp_sum per band).
+    !
+    USE wavefunctions,  ONLY : psic
+    USE wvfct,          ONLY : current_k
+    USE cell_base,      ONLY : omega
+    USE ions_base,      ONLY : nat, ityp
+    USE uspp_param,     ONLY : nh, nhm
+    USE uspp,           ONLY : ofsbeta
+    USE becmod,         ONLY : becp
+    USE fft_base,       ONLY : dffts
+    USE mp_bands,       ONLY : intra_bgrp_comm
+    USE mp,             ONLY : mp_sum
+    !
+    IMPLICIT NONE
+    !
+    INTEGER, INTENT(IN) :: ibnd_start, n
+    COMPLEX(DP), INTENT(IN) :: psi(:,:)
+    !
+    INTEGER :: nb, b0, ib, i, ir, ia, ih, nhn, mbia
+    REAL(DP) :: facb
+    COMPLEX(DP) :: z
+    REAL(DP), ALLOCATABLE :: wblk(:,:), bec2(:,:)
+    !
+    nb = MIN( rs_block, n )
+    ALLOCATE( wblk(MAX(boxtot,1),2*nb), bec2(nhm,2*nb) )
+    CALL set_xkphase( current_k )
+    facb = SQRT(omega) / (dffts%nr1*dffts%nr2*dffts%nr3)
+    !
+    DO b0 = 1, n, nb
+       ib = MIN( nb, n-b0+1 )
+       DO i = 1, ib
+          CALL invfft_orbital_k( psi, ibnd_start+b0+i-2, ibnd_start+n-1 )
+          DO ir = 1, boxtot
+             z = psic( box_beta(ir) ) * CONJG( xkphase(ir) )
+             wblk(ir,2*i-1) = DBLE(z) ; wblk(ir,2*i) = AIMAG(z)
+          ENDDO
+       ENDDO
+       CALL start_clock( 'calbec_rs' )
+       becp%k(:,b0:b0+ib-1) = (0.0_DP,0.0_DP)
+       DO ia = 1, nat
+          mbia = maxbox_beta(ia) ; nhn = nh(ityp(ia))
+          IF ( mbia == 0 .OR. nhn == 0 ) CYCLE
+          CALL DGEMM( 'T', 'N', nhn, 2*ib, mbia, facb, betasave(box_s(ia),1), SIZE(betasave,1), &
+                      wblk(box_s(ia),1), SIZE(wblk,1), 0.0_DP, bec2, nhm )
+          DO i = 1, ib
+             DO ih = 1, nhn
+                becp%k(ofsbeta(ia)+ih,b0+i-1) = CMPLX( bec2(ih,2*i-1), bec2(ih,2*i), KIND=DP )
+             ENDDO
+          ENDDO
+       ENDDO
+       CALL mp_sum( becp%k(:,b0:b0+ib-1), intra_bgrp_comm )
+       CALL stop_clock( 'calbec_rs' )
+    ENDDO
+    DEALLOCATE( wblk, bec2 )
+    !
+  END SUBROUTINE calbec_rs_k_block
+  !
+  !--------------------------------------------------------------------------
+  SUBROUTINE s_psi_rs_k_block( m, spsi )
+    !--------------------------------------------------------------------------
+    !! Blocked version of the k-point real-space loop of s_psi_ (CPU): adds
+    !! (S-1)|psi> to spsi for m bands, using becp computed by h_psi.
+    !
+    USE wavefunctions,  ONLY : psic
+    USE wvfct,          ONLY : current_k
+    USE cell_base,      ONLY : omega
+    USE ions_base,      ONLY : nat, ityp
+    USE uspp_param,     ONLY : nh, nhm
+    USE uspp,           ONLY : qq_at, ofsbeta
+    USE becmod,         ONLY : becp
+    USE fft_base,       ONLY : dffts
+    !
+    IMPLICIT NONE
+    !
+    INTEGER, INTENT(IN) :: m
+    COMPLEX(DP), INTENT(INOUT) :: spsi(:,:)
+    !
+    INTEGER :: nb, b0, ib, i, ir, ia, ih, nhn, mbia, nnr
+    REAL(DP) :: faca
+    REAL(DP), ALLOCATABLE :: outb(:,:), bec2(:,:), w2(:,:)
+    !
+    IF ( dffts%has_task_groups ) CALL errore( 's_psi_rs_k_block', 'task_groups not implemented', 1 )
+    nb  = MIN( rs_block, m )
+    nnr = dffts%nnr
+    ALLOCATE( outb(MAX(boxtot,1),2*nb), bec2(nhm,2*nb), w2(nhm,2*nb) )
+    CALL set_xkphase( current_k )
+    faca = SQRT(omega)
+    !
+    DO b0 = 1, m, nb
+       ib = MIN( nb, m-b0+1 )
+       CALL start_clock( 's_psir' )
+       DO ia = 1, nat
+          mbia = maxbox_beta(ia) ; nhn = nh(ityp(ia))
+          IF ( mbia == 0 .OR. nhn == 0 ) CYCLE
+          DO i = 1, ib
+             DO ih = 1, nhn
+                bec2(ih,2*i-1) = DBLE ( becp%k(ofsbeta(ia)+ih,b0+i-1) )
+                bec2(ih,2*i)   = AIMAG( becp%k(ofsbeta(ia)+ih,b0+i-1) )
+             ENDDO
+          ENDDO
+          CALL DGEMM( 'N', 'N', nhn, 2*ib, nhn, faca, qq_at(1,1,ia), SIZE(qq_at,1), &
+                      bec2, nhm, 0.0_DP, w2, nhm )
+          CALL DGEMM( 'N', 'N', mbia, 2*ib, nhn, 1.0_DP, betasave(box_s(ia),1), SIZE(betasave,1), &
+                      w2, nhm, 0.0_DP, outb(box_s(ia),1), SIZE(outb,1) )
+       ENDDO
+       CALL stop_clock( 's_psir' )
+       DO i = 1, ib
+          psic(1:nnr) = (0.0_DP,0.0_DP)
+          DO ir = 1, boxtot
+             psic( box_beta(ir) ) = psic( box_beta(ir) ) + &
+                  xkphase(ir) * CMPLX( outb(ir,2*i-1), outb(ir,2*i), KIND=DP )
+          ENDDO
+          CALL fwfft_orbital_k( spsi, b0+i-1, m, add_to_orbital=.TRUE. )
+       ENDDO
+    ENDDO
+    !
+    DEALLOCATE( outb, bec2, w2 )
+    !
+  END SUBROUTINE s_psi_rs_k_block
   !
 END MODULE realus

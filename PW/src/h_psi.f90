@@ -106,7 +106,7 @@ SUBROUTINE h_psi_( lda, n, m, psi, hpsi )
   USE realus,                  ONLY: real_space, invfft_orbital_gamma, fwfft_orbital_gamma, &
                                      calbec_rs_gamma, add_vuspsir_gamma, invfft_orbital_k,  &
                                      fwfft_orbital_k, calbec_rs_k, add_vuspsir_k,           & 
-                                     v_loc_psir_inplace
+                                     v_loc_psir_inplace, rs_block, h_psi_rs_k_block
   USE fft_base,                ONLY: dffts
   USE exx,                     ONLY: use_ace, vexx, vexxace_gamma, vexxace_k, &
                                                     vexxace_gamma_gpu, vexxace_k_gpu
@@ -224,6 +224,10 @@ SUBROUTINE h_psi_( lda, n, m, psi, hpsi )
         IF ( dffts%has_task_groups .and..not. use_gpu ) &
              CALL errore( 'h_psi', 'task_groups not implemented with real_space', 1 )
         !
+        IF ( rs_block > 1 .AND. .NOT. use_gpu ) THEN
+           ! ... blocked real-space algorithm (several bands at a time)
+           CALL h_psi_rs_k_block( m, psi, hpsi )
+        ELSE
         DO ibnd = 1, m
            ! ... transform psi to real space -> psic 
            CALL invfft_orbital_k( psi, ibnd, m )
@@ -240,6 +244,7 @@ SUBROUTINE h_psi_( lda, n, m, psi, hpsi )
            CALL fwfft_orbital_k( hpsi, ibnd, m, add_to_orbital=.TRUE. )
            !
         ENDDO
+        ENDIF
         !
      ELSE IF ( dffts%has_task_groups .and..not. use_gpu ) THEN
         ! ... usual reciprocal-space algorithm, with task groups

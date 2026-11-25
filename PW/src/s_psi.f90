@@ -99,7 +99,8 @@ SUBROUTINE s_psi_( lda, n, m, psi, spsi )
   USE realus,           ONLY: real_space, invfft_orbital_gamma,     &
                               fwfft_orbital_gamma, calbec_rs_gamma, &
                               s_psir_gamma, invfft_orbital_k,       &
-                              fwfft_orbital_k, calbec_rs_k, s_psir_k
+                              fwfft_orbital_k, calbec_rs_k, s_psir_k, &
+                              rs_block, s_psi_rs_k_block
   USE wavefunctions,    ONLY: psic
   USE fft_base,         ONLY: dffts
 #if defined (__CUDA)
@@ -169,6 +170,9 @@ SUBROUTINE s_psi_( lda, n, m, psi, spsi )
      !
      IF ( real_space ) THEN
         !
+        IF ( rs_block > 1 ) THEN
+           CALL s_psi_rs_k_block( m, spsi )
+        ELSE
         DO ibnd = 1, m
 !SdG: the becp are already computed ! no need to invfft psi to real space.
 !           CALL invfft_orbital_k( psi, ibnd, m )
@@ -179,6 +183,7 @@ SUBROUTINE s_psi_( lda, n, m, psi, spsi )
 !SdG: ... and add it to spsi (already containing psi).
            CALL fwfft_orbital_k( spsi, ibnd, m, add_to_orbital=.TRUE. )
         ENDDO
+        ENDIF
         !
      ELSE
         !
