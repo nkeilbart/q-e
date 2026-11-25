@@ -26,7 +26,7 @@ SUBROUTINE hinit0()
   USE beta_mod,         ONLY : init_tab_beta
   USE realus,           ONLY : generate_qpointlist, betapointlist, &
                                init_realspace_vars, real_space
-  USE realus,           ONLY : rs_cost_model, env_real, rs_free_vkb
+  USE realus,           ONLY : rs_cost_model, env_real, rs_free_vkb, rs_coarse_setup
   USE uspp,             ONLY : okvan, vkb
   USE control_flags,    ONLY : gamma_only, use_gpu, isolve, lscf, lmd, lbfgs, tstress
   USE noncollin_module, ONLY : noncolin
@@ -187,6 +187,8 @@ SUBROUTINE hinit0()
         IF ( ALLOCATED( vkb ) ) DEALLOCATE( vkb )
         WRITE( stdout, '(5X,"Projectors: G-space vkb is not kept in memory")' )
      ENDIF
+     ! ... G-space projectors: the coarse grid is used for V_loc|psi> only
+     IF ( .NOT. real_space .AND. lscf ) CALL rs_coarse_setup()
   ENDIF
   !
   IF (real_space ) THEN

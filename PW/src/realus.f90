@@ -137,7 +137,7 @@ MODULE realus
   PUBLIC :: rs_block, h_psi_rs_k_block, s_psi_rs_k_block, calbec_rs_k_block
   PUBLIC :: rs_cost_model, env_real
   PUBLIC :: rs_becp_push, rs_becp_flush, rs_becp_ready, rs_free_vkb
-  PUBLIC :: rs_coarse, rs_update_vc, rs_coarse_check
+  PUBLIC :: rs_coarse, rs_update_vc, rs_coarse_check, rs_coarse_setup, vloc_psi_k_coarse
   !
   CONTAINS
   
@@ -3238,11 +3238,37 @@ MODULE realus
     dfftc%rho_clock_label = 'fftc' ; dfftc%wave_clock_label = 'fftcw'
     CALL ggens( dfftc, gamma_only, at, g, gg, mill, fac**2*gkcut, ngmc )
     rs_coarse = .TRUE.
-    WRITE( stdout, '(5X,"RS projectors: coarse grid factor",F6.3,"  FFT dimensions (",I4,",",I4,",",I4, &
+    WRITE( stdout, '(5X,"Coarse FFT grid for the first scf iterations: factor",F6.3,"  FFT dimensions (",I4,",",I4,",",I4, &
          &")  smooth grid (",I4,",",I4,",",I4,")")' ) fac, dfftc%nr1, dfftc%nr2, dfftc%nr3, &
          dffts%nr1, dffts%nr2, dffts%nr3
     !
   END SUBROUTINE rs_coarse_setup
+  !
+  !--------------------------------------------------------------------------
+  SUBROUTINE vloc_psi_k_coarse( m, psi, hpsi )
+    !--------------------------------------------------------------------------
+    !! hpsi <- hpsi + V_loc|psi> for m bands, k-point version, with the product
+    !! done on the coarse FFT grid (first scf iterations, G-space projectors).
+    !
+    USE wavefunctions,  ONLY : psic
+    USE lsda_mod,       ONLY : current_spin
+    !
+    IMPLICIT NONE
+    INTEGER, INTENT(IN) :: m
+    COMPLEX(DP), INTENT(IN)    :: psi(:,:)
+    COMPLEX(DP), INTENT(INOUT) :: hpsi(:,:)
+    INTEGER :: ibnd, nnr
+    !
+    CALL start_clock( 'vloc_psi' )
+    nnr = dfftc%nnr
+    DO ibnd = 1, m
+       CALL rs_g2r( psi, ibnd )
+       psic(1:nnr) = vrs_c(1:nnr,current_spin) * psic(1:nnr)
+       CALL rs_r2g_add( hpsi, ibnd )
+    ENDDO
+    CALL stop_clock( 'vloc_psi' )
+    !
+  END SUBROUTINE vloc_psi_k_coarse
   !
   !--------------------------------------------------------------------------
   SUBROUTINE rs_coarse_check( dr2, nelec )
@@ -3261,9 +3287,9 @@ MODULE realus
     rs_coarse = .FALSE.
     IF ( ALLOCATED( boxrad_beta ) ) DEALLOCATE( boxrad_beta )
     IF ( ALLOCATED( vrs_c ) ) DEALLOCATE( vrs_c )
-    WRITE( stdout, '(/,5X,"RS projectors: estimated scf accuracy",ES10.2," Ry -> switching from the coarse", &
-         &" to the smooth FFT grid")' ) dr2
-    CALL betapointlist()
+    WRITE( stdout, '(/,5X,"Coarse FFT grid: estimated scf accuracy",ES10.2," Ry -> switching to the", &
+         &" smooth FFT grid")' ) dr2
+    IF ( real_space ) CALL betapointlist()
     !
   END SUBROUTINE rs_coarse_check
   !

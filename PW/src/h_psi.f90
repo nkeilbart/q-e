@@ -106,7 +106,8 @@ SUBROUTINE h_psi_( lda, n, m, psi, hpsi )
   USE realus,                  ONLY: real_space, invfft_orbital_gamma, fwfft_orbital_gamma, &
                                      calbec_rs_gamma, add_vuspsir_gamma, invfft_orbital_k,  &
                                      fwfft_orbital_k, calbec_rs_k, add_vuspsir_k,           & 
-                                     v_loc_psir_inplace, rs_block, h_psi_rs_k_block
+                                     v_loc_psir_inplace, rs_block, h_psi_rs_k_block, &
+                                     rs_coarse, vloc_psi_k_coarse
   USE fft_base,                ONLY: dffts
   USE exx,                     ONLY: use_ace, vexx, vexxace_gamma, vexxace_k, &
                                                     vexxace_gamma_gpu, vexxace_k_gpu
@@ -251,7 +252,12 @@ SUBROUTINE h_psi_( lda, n, m, psi, hpsi )
         CALL vloc_psi_tg_k( lda, n, m, psi, vrs(1,current_spin), hpsi ) 
      ELSE
         ! ... usual reciprocal-space algorithm
-        CALL vloc_psi_k_acc( lda, n, m, psi, vrs(1,current_spin), hpsi ) 
+        IF ( rs_coarse .AND. .NOT. use_gpu ) THEN
+           ! ... first scf iterations: product on the coarse FFT grid
+           CALL vloc_psi_k_coarse( m, psi, hpsi )
+        ELSE
+        CALL vloc_psi_k_acc( lda, n, m, psi, vrs(1,current_spin), hpsi )
+        ENDIF 
         !
      ENDIF
      !
