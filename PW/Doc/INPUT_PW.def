@@ -2806,7 +2806,7 @@ input_description -distribution {Quantum ESPRESSO} -package PWscf -program pw.x 
     }
 
     var fft_coarse_thr -type REAL {
-        default { 1.D-6 }
+        default { 1.D-4 }
         info {
             The run switches from the coarse to the smooth FFT grid (see
             @ref fft_coarse_factor) when the estimated scf accuracy per electron,

@@ -62,7 +62,7 @@ MODULE realus
   LOGICAL :: rs_coarse_allowed = .TRUE.
   REAL(DP) :: rs_gridfac = 1.5_DP
   !! input fft_coarse_factor (env QE_RS_GRIDFAC overrides it, for tests)
-  REAL(DP) :: rs_coarse_thr = 1.0D-6
+  REAL(DP) :: rs_coarse_thr = 1.0D-4
   !! input fft_coarse_thr (env QE_RS_COARSE_TR2 overrides it, for tests)
   REAL(DP), ALLOCATABLE :: vrs_c(:,:)
   !! local potential on the coarse grid
@@ -3412,7 +3412,7 @@ MODULE realus
   SUBROUTINE rs_coarse_check( dr2, nelec, force )
     !--------------------------------------------------------------------------
     !! The coarse grid is used only while the SCF error is large: when the
-    !! estimated SCF accuracy dr2 falls below fft_coarse_thr (input, default 1e-6 Ry)
+    !! estimated SCF accuracy dr2 falls below fft_coarse_thr (input, default 1e-4 Ry)
     !! per electron, the real-space projector path goes back to the smooth
     !! grid, so that the converged result is that of the exact product grid.
     !! QE_RS_COARSE_TR2=0 keeps the coarse grid to the end.

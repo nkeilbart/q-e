@@ -1041,7 +1041,7 @@ MODULE input_parameters
           !! coarser FFT grid holding the G sphere of radius fft_coarse_factor*sqrt(gkcut);
           !! the smooth grid corresponds to 2. Values >= 2 disable the coarse grid.
 
-        REAL(DP) :: fft_coarse_thr = 1.0E-6_DP
+        REAL(DP) :: fft_coarse_thr = 1.0E-4_DP
           !! the run switches from the coarse to the smooth FFT grid when the estimated
           !! scf accuracy per electron (Ry) falls below this value; the scf never ends
           !! on the coarse grid. 0 keeps the coarse grid until convergence is reached.
